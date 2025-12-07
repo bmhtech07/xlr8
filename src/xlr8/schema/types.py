@@ -62,6 +62,9 @@ class String(BaseType):
 
     def __eq__(self, other) -> bool:
         return isinstance(other, String)
+    
+    def __hash__(self) -> int:
+        return hash(self.__class__.__name__)
 
 # TODO: Support Int32 vs Int64 based on schema definition
 class Int(BaseType):
@@ -85,6 +88,9 @@ class Bool(BaseType):
 
     def __eq__(self, other) -> bool:
         return isinstance(other, Bool)
+    
+    def __hash__(self) -> int:
+        return hash(self.__class__.__name__)
 
 
 @dataclass(frozen=True)
