@@ -1,20 +1,14 @@
 """
-Type definitions for XLR8 schema system. These types will be used to define MongoDB document schema.
-When reading/writing Parquet files, these types will be converted to/from PyArrow types. However, 
-the users can with with Types.Any which will automatically be handled while reading/writing data to fully
-support flexible schema. If a field is not defined in the schema, it will be discarded when writing to Parquet.
-
-Types define how MongoDB values map to Arrow/Parquet types.
-"""
-"""
 Type definitions for XLR8's schema system.
 
-This module provides type classes that define how MongoDB BSON values are mapped to Parquet types.
-These types form the foundation of XLR8's schema system, enabling efficient storage and querying of MongoDB data.
+This module provides type classes that define how MongoDB BSON values 
+are mapped to Parquet types.These types form the foundation of XLR8's 
+schema system, enabling efficient storage and querying of MongoDB data.
 
 Key Features:
 - **Type Safety**: Explicit type definitions for MongoDB document schemas
-- **Arrow Integration**: Seamless conversion between MongoDB BSON and Apache Arrow types
+- **Arrow Integration**: Seamless conversion between MongoDB BSON and Apache 
+Arrow types
 - **Flexible Schema**: Support for both strict and flexible schemas via Types.Any
 
 Supported Types:
@@ -24,7 +18,9 @@ Supported Types:
 Schema Behavior:
 - Fields defined in the schema are type-checked and converted to Arrow types
 - Fields not in the schema are discarded when writing to Parquet.
-- Types.Any provides a flexible escape hatch for dynamic/unknown fields which are stored as structs in Parquet and later decoded back to original BSON types via the Rust backend.
+- Types.Any provides a flexible escape hatch for dynamic/unknown fields 
+which are stored as structs in Parquet and later decoded back to original 
+BSON types via the Rust backend.
 
 """
 
