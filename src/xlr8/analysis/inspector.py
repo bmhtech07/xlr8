@@ -716,6 +716,11 @@ def extract_time_bounds(
         ...     "recordedAt"
         ... )
         (datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 2, 1, tzinfo=UTC))
+
+    Current implementation: $lte: t → $lt: t + 1 microsecond
+    Pros: Clean internal model (half-open intervals [lo, hi))
+    Cons: Tiny semantic change at microsecond precision
+    Impact: Minimal - most MongoDB timestamps are millisecond precision anyway
     """
     lo, hi = None, None
     tf = query_dict.get(time_field)
