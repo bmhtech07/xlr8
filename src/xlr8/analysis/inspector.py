@@ -156,6 +156,7 @@ _all__ = [
     "ValidationResult",
     "has_forbidden_ops",
     "check_conditional_operators",
+    "validate_query_for_chunking",
     # Internal (exported for testing)
     "_or_depth",
     "_references_field",
@@ -494,3 +495,64 @@ def check_conditional_operators(
 
     error = check_tree(query)
     return ValidationResult(False, error) if error else ValidationResult(True)
+
+
+def validate_query_for_chunking(
+    query: dict[str, Any], time_field: str
+) -> tuple[bool, str]:
+    """
+    Validate query operators are compatible with chunking.
+
+    This validates operators only - does not check for time bounds.
+    For full chunkability check including time bounds, use is_chunkable_query().
+
+    Args:
+        query: MongoDB find() filter
+        time_field: Name of time field for chunking
+
+    Returns:
+        Tuple of (is_valid, reason)
+
+    Examples:
+        # Valid query with common operators
+        >>> validate_query_for_chunking({
+        ...     "account_id": ObjectId("..."),
+        ...     "region_id": {"$in": [ObjectId("..."), ...]},
+        ...     "recordedAt": {"$gte": t1, "$lt": t2}
+        ... }, "recordedAt")
+        (True, '')
+
+        # $or with per-branch time ranges (typical XLR8 pattern)
+        >>> validate_query_for_chunking({
+        ...     "$or": [
+        ...         {"sensor": "A", "recordedAt": {"$gte": t1, "$lt": t2}},
+        ...         {"sensor": "B", "recordedAt": {"$gte": t3, "$lt": t4}}
+        ...     ],
+        ...     "account_id": ObjectId("...")
+        ... }, "recordedAt")
+        (True, '')
+
+        # Rejected: contains $expr
+        >>> validate_query_for_chunking({
+        ...     "$expr": {"$gt": ["$endTime", "$startTime"]}
+        ... }, "recordedAt")
+        (False, 'contains forbidden operator: $expr')
+
+        # Rejected: geospatial operator
+        >>> validate_query_for_chunking({
+        ...     "location": {"$near": {"$geometry": {...}}}
+        ... }, "recordedAt")
+        (False, 'contains forbidden operator: $near')
+    """
+    # Phase 1: Check for forbidden operators
+    # IT recurses the query tree and returns on first forbidden operator found.
+    has_forbidden, op = has_forbidden_ops(query)
+    if has_forbidden:
+        return False, f"contains forbidden operator: {op}"
+
+    # Phase 2: Validate conditional operators
+    result = check_conditional_operators(query, time_field)
+    if not result:
+        return False, result.reason
+
+    return True, ""
