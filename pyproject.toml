@@ -32,7 +32,6 @@ select = [
     "W",   # pycodestyle warnings
     "F",   # pyflakes
     "I",   # isort
-    "UP",  # pyupgrade
 ]
 ignore = []
 
