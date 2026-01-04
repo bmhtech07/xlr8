@@ -145,6 +145,7 @@ API USAGE
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 _all__ = [
@@ -160,6 +161,7 @@ _all__ = [
     # Query analysis utilities
     "or_depth",
     "split_global_and",
+    "normalize_datetime",
     # Internal (exported for testing)
     "_or_depth",
     "_references_field",
@@ -660,3 +662,27 @@ def split_global_and(
 
     # Case 3: No $or
     return q, []
+
+
+# =============================================================================
+# TIME BOUNDS EXTRACTION
+# =============================================================================
+
+
+def normalize_datetime(dt: Any) -> datetime | None:
+    """
+    Normalize to timezone-aware UTC datetime.
+
+    Handles datetime objects and ISO format strings.
+    Returns None if parsing fails.
+    """
+    if isinstance(dt, datetime):
+        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+
+    if isinstance(dt, str):
+        try:
+            parsed = datetime.fromisoformat(dt.replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+        except (ValueError, AttributeError):
+            return None
+    return None
