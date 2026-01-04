@@ -146,7 +146,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Dict, Tuple
 
 _all__ = [
     # Classification sets
@@ -738,7 +738,7 @@ def extract_time_bounds(
     return lo, hi
 
 
-def normalize_query(query: dict[str, Any]) -> tuple[dict[str, Any], dict[str, bool]]:
+def normalize_query(query: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, bool]]:
     """
     Phase 1: Normalize query structure for consistent analysis.
 
@@ -780,3 +780,54 @@ def normalize_query(query: dict[str, Any]) -> tuple[dict[str, Any], dict[str, bo
                 result[key] = value
 
         return result
+
+    def count_or_operators(obj: Any, depth: int = 0) -> Tuple[int, int]:
+        """
+        Count $or operators and find max nesting depth.
+        Returns (or_count, max_or_depth)
+        """
+        if not isinstance(obj, dict):
+            return 0, depth
+
+        or_count = 0
+        max_depth = depth
+
+        for key, value in obj.items():
+            if key == "$or":
+                or_count += 1
+                current_depth = depth + 1
+                max_depth = max(max_depth, current_depth)
+
+                # Check for nested $or inside branches
+                if isinstance(value, list):
+                    for branch in value:
+                        sub_count, sub_depth = count_or_operators(branch, current_depth)
+                        or_count += sub_count
+                        max_depth = max(max_depth, sub_depth)
+            elif isinstance(value, dict):
+                sub_count, sub_depth = count_or_operators(value, depth)
+                or_count += sub_count
+                max_depth = max(max_depth, sub_depth)
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict):
+                        sub_count, sub_depth = count_or_operators(item, depth)
+                        or_count += sub_count
+                        max_depth = max(max_depth, sub_depth)
+
+        return or_count, max_depth
+
+    # Step 1: Flatten nested $and
+    normalized = flatten_and_operators(query)
+
+    # Step 2: Detect $or complexity
+    or_count, max_or_depth = count_or_operators(normalized)
+
+    # Step 3: Build complexity flags
+    flags = {
+        "multiple_or": or_count > 1,
+        "nested_or": max_or_depth > 1,
+        "complex_negation": False,  # Checked in Phase 4
+    }
+
+    return normalized, flags
