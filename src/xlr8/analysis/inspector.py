@@ -146,7 +146,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 _all__ = [
     # Classification sets
@@ -164,6 +164,7 @@ _all__ = [
     "extract_time_bounds",
     "normalize_datetime",
     "normalize_query",
+    "extract_time_bounds_recursive",
     # Internal (exported for testing)
     "_or_depth",
     "_references_field",
@@ -740,7 +741,7 @@ def extract_time_bounds(
 
 def normalize_query(query: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, bool]]:
     """
-    Phase 1: Normalize query structure for consistent analysis.
+    Normalize query structure for consistent analysis.
 
     Transformations:
     - Flatten nested $and operators
@@ -831,3 +832,218 @@ def normalize_query(query: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, bo
     }
 
     return normalized, flags
+
+
+def extract_time_bounds_recursive(
+    query: Dict[str, Any], time_field: str, context: str = "POSITIVE"
+) -> Tuple[Optional[Tuple[datetime, datetime]], bool]:
+    """
+    Recursively extract time bounds from query tree.
+
+    Handles nested structures, $and (intersection), $or (union).
+
+    Args:
+        query: Query dict
+        time_field: Name of time field
+        context: "POSITIVE" or "NEGATED" (inside $nor/$not)
+
+    Returns:
+        Tuple of (time_bounds, has_time_ref)
+        - time_bounds: (lo, hi) or None
+        - has_time_ref: True if query references time field anywhere
+    """
+
+    def extract_from_time_field(value: Any) -> Tuple[Optional[Tuple], bool]:
+        """Extract bounds from time field value."""
+        if context == "NEGATED":
+            # Time field in negated context → can't use
+            return None, True
+
+        if not isinstance(value, dict):
+            # Direct equality: {"timestamp": t1}
+            dt = normalize_datetime(value)
+            return ((dt, dt), True) if dt else (None, True)
+
+        lo, hi = None, None
+
+        for op, operand in value.items():
+            if op == "$gte":
+                new_lo = normalize_datetime(operand)
+                # Take most restrictive lower bound
+                if new_lo:
+                    lo = max(lo, new_lo) if lo is not None else new_lo
+            elif op == "$gt":
+                dt = normalize_datetime(operand)
+                if dt:
+                    new_lo = dt + timedelta(microseconds=1)
+                    # Take most restrictive lower bound
+                    lo = max(lo, new_lo) if lo is not None else new_lo
+            elif op == "$lt":
+                new_hi = normalize_datetime(operand)
+                # Take most restrictive upper bound
+                if new_hi:
+                    hi = min(hi, new_hi) if hi is not None else new_hi
+            elif op == "$lte":
+                dt = normalize_datetime(operand)
+                if dt:
+                    new_hi = dt + timedelta(microseconds=1)
+                    # Take most restrictive upper bound
+                    hi = min(hi, new_hi) if hi is not None else new_hi
+            elif op == "$eq":
+                dt = normalize_datetime(operand)
+                lo = hi = dt
+            elif op == "$in":
+                # Take envelope
+                if isinstance(operand, list):
+                    if not operand:
+                        # Empty $in array matches no documents
+                        return None, True
+                    dates = [normalize_datetime(d) for d in operand]
+                    dates = [d for d in dates if d is not None]
+                    if dates:
+                        lo = min(dates)
+                        hi = max(dates)
+            elif op in {"$ne", "$nin", "$not"}:
+                # Negation on time field
+                return None, True
+
+        if lo is not None and hi is not None:
+            # Validate bounds are sensible
+            if lo >= hi:
+                # Contradictory bounds (e.g., $gte: 2024-02-01, $lt: 2024-01-01)
+                return None, True
+            return (lo, hi), True
+
+        return None, True
+
+    def intersect_bounds(b1: Tuple, b2: Tuple) -> Optional[Tuple]:
+        """Intersect two bounds."""
+        lo = max(b1[0], b2[0])
+        hi = min(b1[1], b2[1])
+
+        if lo >= hi:
+            return None  # Empty intersection
+
+        return (lo, hi)
+
+    # Check if this is time field directly
+    if time_field in query:
+        return extract_from_time_field(query[time_field])
+
+    # Handle $and (intersection of bounds)
+    if "$and" in query:
+        all_bounds = []
+        has_time_ref = False
+
+        for item in query["$and"]:
+            if isinstance(item, dict):
+                bounds, has_ref = extract_time_bounds_recursive(
+                    item, time_field, context
+                )
+                if has_ref:
+                    has_time_ref = True
+                if bounds:
+                    all_bounds.append(bounds)
+
+        if not all_bounds:
+            return None, has_time_ref
+
+        # Intersection
+        merged = all_bounds[0]
+        for bounds in all_bounds[1:]:
+            merged = intersect_bounds(merged, bounds)
+            if merged is None:
+                return None, has_time_ref
+
+        return merged, has_time_ref
+
+    # Handle $or (union/envelope of bounds)
+    if "$or" in query:
+        all_bounds = []
+        all_have_time_ref = []
+        has_time_ref = False
+        has_any_partial_or_missing = False
+
+        for item in query["$or"]:
+            if isinstance(item, dict):
+                bounds, has_ref = extract_time_bounds_recursive(
+                    item, time_field, context
+                )
+                all_have_time_ref.append(has_ref)
+
+                if has_ref:
+                    has_time_ref = True
+
+                    if bounds is None:
+                        # Branch references time field but has partial/no bounds
+                        has_any_partial_or_missing = True
+                    else:
+                        all_bounds.append(bounds)
+                else:
+                    # Branch doesn't reference time field at all
+                    has_any_partial_or_missing = True
+
+        # CRITICAL: If ANY branch is unbounded, partial, or doesn't reference time,
+        # we cannot safely extract bounds. Taking envelope of only bounded branches
+        # would cause data loss from unbounded/unreferenced branches.
+        if has_any_partial_or_missing:
+            return None, has_time_ref
+
+        if not all_bounds:
+            return None, has_time_ref
+
+        # All branches have full bounds - safe to take union (envelope)
+        lo = min(b[0] for b in all_bounds)
+        hi = max(b[1] for b in all_bounds)
+
+        return (lo, hi), has_time_ref
+
+    # Handle $nor (negates context)
+    if "$nor" in query:
+        new_context = "NEGATED" if context == "POSITIVE" else "POSITIVE"
+        has_time_ref = False
+
+        for item in query["$nor"]:
+            if isinstance(item, dict):
+                _, has_ref = extract_time_bounds_recursive(
+                    item, time_field, new_context
+                )
+                if has_ref:
+                    has_time_ref = True
+
+        # $nor with time ref is unsafe (inverted bounds)
+        return None, has_time_ref
+
+    # Check all nested dicts
+    all_bounds = []
+    has_time_ref = False
+
+    for key, value in query.items():
+        if isinstance(value, dict):
+            bounds, has_ref = extract_time_bounds_recursive(value, time_field, context)
+            if has_ref:
+                has_time_ref = True
+            if bounds:
+                all_bounds.append(bounds)
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    bounds, has_ref = extract_time_bounds_recursive(
+                        item, time_field, context
+                    )
+                    if has_ref:
+                        has_time_ref = True
+                    if bounds:
+                        all_bounds.append(bounds)
+
+    # Merge bounds (intersection)
+    if not all_bounds:
+        return None, has_time_ref
+
+    merged = all_bounds[0]
+    for bounds in all_bounds[1:]:
+        merged = intersect_bounds(merged, bounds)
+        if merged is None:
+            return None, has_time_ref
+
+    return merged, has_time_ref
