@@ -48,3 +48,67 @@ With 10 workers, chunks are processed in parallel:
   Workers 0-9 grab chunks 1-10 immediately
   As workers finish, they grab chunks 11-13
 """
+
+from datetime import datetime, timedelta, timezone
+from typing import List, Optional, Tuple
+
+
+def chunk_time_range(
+    start: datetime,
+    end: datetime,
+    chunk_size: Optional[timedelta] = None,
+) -> List[Tuple[datetime, datetime]]:
+    """
+    Split time range into chunks.
+
+    Creates chunks of specified size, aligned to boundaries.
+
+    Args:
+        start: Start datetime (inclusive)
+        end: End datetime (exclusive)
+        chunk_size: Size of each chunk as timedelta (default: 1 day)
+
+    Returns:
+        List of (chunk_start, chunk_end) tuples
+
+    Examples:
+        Day-level chunking:
+        >>> start = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        >>> end = datetime(2024, 1, 5, 8, 0, 0, tzinfo=timezone.utc)
+        >>> chunks = chunk_time_range(start, end, chunk_size=timedelta(days=1))
+
+        Hour-level chunking:
+        >>> chunks = chunk_time_range(start, end, chunk_size=timedelta(hours=8))
+    """
+    # Ensure timezone-aware
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
+
+    if start >= end:
+        return []
+
+    # Determine step size
+    if chunk_size is not None:
+        step = chunk_size
+    else:
+        step = timedelta(days=1)  # Default to 1 day
+
+    out: List[Tuple[datetime, datetime]] = []
+
+    # First boundary strictly AFTER start, aligned to day start + step
+    first_boundary = (
+        datetime(start.year, start.month, start.day, tzinfo=timezone.utc) + step
+    )
+
+    lo = start
+    cur = first_boundary
+
+    while lo < end:
+        chunk_end = cur if cur < end else end
+        out.append((lo, chunk_end))
+        lo = cur
+        cur = cur + step
+
+    return out
