@@ -2,6 +2,7 @@
 Execution planning and memory management for XLR8.
 """
 
+from xlr8.execution.callback import PartitionWorkItem
 from xlr8.execution.planner import (
     DEFAULT_BACKEND,
     DEFAULT_CONFIG,
@@ -24,4 +25,6 @@ __all__ = [
     "ExecutionPlan",
     "calculate_flush_trigger",
     "build_execution_plan",
+    # callback.py exports
+    "PartitionWorkItem",
 ]
