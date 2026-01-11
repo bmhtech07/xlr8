@@ -4,22 +4,22 @@ Schema system for XLR8.
 Provides types and schema definitions for MongoDB documents.
 """
 
-from .types import (
-    BaseType,
-    String,
-    Int,
-    Float,
-    Bool,
-    Timestamp,
-    ObjectId,
-    Any,
-    Struct,
-    List,
-)
-
 # Import types module for Types.X syntax
 from . import types as Types
+from .encoder import ValueEncoder
 from .schema import Schema
+from .types import (
+    Any,
+    BaseType,
+    Bool,
+    Float,
+    Int,
+    List,
+    ObjectId,
+    String,
+    Struct,
+    Timestamp,
+)
 
 __all__ = [
     # Types module for Types.X syntax
@@ -36,5 +36,7 @@ __all__ = [
     "Struct",
     "List",
     # Schema
-    "Schema"
+    "Schema",
+    # Encoder
+    "ValueEncoder",
 ]
