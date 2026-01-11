@@ -240,6 +240,7 @@ _all__ = [
     "ChunkabilityMode",
     "ChunkabilityResult",
     "has_forbidden_ops",
+    "has_unknown_operators",
     "check_conditional_operators",
     "validate_query_for_chunking",
     # Query analysis utilities
@@ -507,9 +508,12 @@ class ChunkabilityResult(NamedTuple):
 # =============================================================================
 
 
-def has_forbidden_ops(query: Any) -> tuple[bool, str | None]:
+def has_forbidden_ops(query: Any) -> Tuple[bool, Optional[str]]:
     """
     Check if query contains any NEVER_ALLOWED operator.
+
+    These operators require the full dataset and cannot be parallelized.
+    Triggers SINGLE mode (single-worker execution).
 
     Recursively walks the query tree looking for forbidden operator keys.
     Returns on first forbidden operator found (fail-fast).
@@ -540,6 +544,49 @@ def has_forbidden_ops(query: Any) -> tuple[bool, str | None]:
     elif isinstance(query, list):
         for item in query:
             found, op = has_forbidden_ops(item)
+            if found:
+                return True, op
+    return False, None
+
+
+def has_unknown_operators(query: Any) -> Tuple[bool, Optional[str]]:
+    """
+    Check if query contains operators not in our classification lists.
+
+    This provides a conservative "fail-closed" approach for MongoDB operators
+    that are not yet classified. Unknown operators trigger SINGLE mode execution
+    (experimental/cautious path) rather than being silently allowed.
+
+    Args:
+        query: MongoDB query (dict, list, or primitive)
+
+    Returns:
+        Tuple of (has_unknown, operator_name)
+
+    Examples:
+        >>> has_unknown_operators({"status": "active"})
+        (False, None)
+
+        >>> has_unknown_operators({"$futureOp": {"$someLogic": "..."}})
+        (True, '$futureOp')
+
+        >>> has_unknown_operators({"value": {"$gt": 100}})
+        (False, None)
+    """
+    KNOWN_OPS = ALWAYS_ALLOWED | CONDITIONAL | NEVER_ALLOWED
+
+    if isinstance(query, dict):
+        for key, value in query.items():
+            # Check if key is an operator (starts with $) and not in known lists
+            if key.startswith("$") and key not in KNOWN_OPS:
+                return True, key
+            # Recurse into value
+            found, op = has_unknown_operators(value)
+            if found:
+                return True, op
+    elif isinstance(query, list):
+        for item in query:
+            found, op = has_unknown_operators(item)
             if found:
                 return True, op
     return False, None
