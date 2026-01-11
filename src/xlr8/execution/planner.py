@@ -102,3 +102,88 @@ PYTHON_CONFIG = BackendConfig(
 # Default backend for current implementation
 DEFAULT_BACKEND = Backend.RUST
 DEFAULT_CONFIG = RUST_CONFIG
+
+# =============================================================================
+# SHARED CONSTANTS TODO: Might move to constants.py
+# =============================================================================
+
+# MongoDB cursor efficiency: below this, network overhead dominates
+MIN_BATCH_SIZE = 2_000
+
+# Buffer headroom for in-flight batch (flush check happens after batch added)
+BATCH_HEADROOM_RATIO = 0.2
+
+
+# =============================================================================
+# MEMORY CALCULATION
+# =============================================================================
+
+
+def calculate_flush_trigger(
+    peak_ram_limit_mb: int,
+    worker_count: int,
+    avg_doc_size_bytes: int,
+    config: BackendConfig = DEFAULT_CONFIG,
+) -> tuple[int, int]:
+    """
+    Calculate flush trigger and batch size from memory constraints.
+
+    This is the core memory planning function. It divides available RAM
+    among workers while accounting for baseline overhead and cursor buffers.
+
+    Args:
+        peak_ram_limit_mb: Total RAM budget from user
+        worker_count: Number of parallel workers
+        avg_doc_size_bytes: Average document size for batch sizing
+        config: Backend-specific memory constants
+
+    Returns:
+        Tuple of (flush_trigger_mb, batch_size_docs)
+
+    Example:
+        >>> trigger, batch = calculate_flush_trigger(5000, 16, 250)
+        >>> print(f"Per-worker: {trigger}MB, batch: {batch} docs")
+        Per-worker: 300MB, batch: 500000 docs
+    """
+    # Available RAM after baseline overhead
+    available_ram_mb = peak_ram_limit_mb - config.baseline_mb
+
+    if available_ram_mb <= 0:
+        raise ValueError(
+            f"peak_ram_limit_mb ({peak_ram_limit_mb} MB) must be greater than "
+            f"baseline ({config.baseline_mb} MB). "
+            f"Minimum viable: {config.baseline_mb + 50} MB."
+        )
+
+    # Account for GC retention (Python holds onto freed memory)
+    effective_ram_mb = available_ram_mb / config.retention_factor
+
+    # Subtract cursor overhead (each worker has a live MongoDB cursor)
+    cursor_overhead_total = worker_count * config.cursor_overhead_mb
+    ram_for_data = effective_ram_mb - cursor_overhead_total
+
+    # Ensure we have at least some RAM for data
+    ram_for_data = max(ram_for_data, worker_count * 1)  # At least 1 MB per worker
+
+    # Each worker's allocation
+    worker_allocation_mb = ram_for_data / worker_count
+
+    # For Rust backend: the 15x multiplier is handled INSIDE the Rust buffer
+    # So flush_trigger_mb is the actual MB limit the buffer should use
+    # No need to divide by memory_multiplier here - Rust does that internally
+
+    # Split: 80% flush trigger, 20% batch headroom
+    flush_trigger_mb = worker_allocation_mb * (1 - BATCH_HEADROOM_RATIO)
+    batch_headroom_mb = worker_allocation_mb * BATCH_HEADROOM_RATIO
+
+    # Batch size from headroom
+    batch_headroom_bytes = batch_headroom_mb * 1024 * 1024
+    batch_size_docs = int(batch_headroom_bytes / avg_doc_size_bytes)
+
+    # Floor at MIN_BATCH_SIZE for MongoDB efficiency
+    batch_size_docs = max(MIN_BATCH_SIZE, batch_size_docs)
+
+    # Floor flush trigger at 1 MB (sanity check)
+    flush_trigger_mb = max(1, int(flush_trigger_mb))
+
+    return flush_trigger_mb, batch_size_docs
