@@ -10,6 +10,7 @@ Test Categories:
     3. NEVER_ALLOWED operators - verify each one is rejected
     4. Complex/realistic queries - real-world patterns
     5. Edge cases - tricky scenarios designed to find bugs
+    6. Three-tier graceful degradation - PARALLEL/SINGLE/REJECT modes
 """
 
 from datetime import datetime, timedelta, timezone
@@ -21,8 +22,11 @@ from xlr8.analysis.inspector import (
     ALWAYS_ALLOWED,
     CONDITIONAL,
     NEVER_ALLOWED,
+    ChunkabilityMode,
+    ChunkabilityResult,
     _or_depth,
     _references_field,
+    has_natural_sort,
     is_chunkable_query,
     split_global_and,
     validate_query_for_chunking,
@@ -748,7 +752,7 @@ class TestComplexQueries:
 
 
 # =============================================================================
-# Test Class: Edge Cases (Devil's Advocate)
+# Test Class: Edge Cases
 # =============================================================================
 
 
@@ -761,9 +765,12 @@ class TestEdgeCases:
         """Empty query - should fail due to no time range."""
         valid, reason = validate_query_for_chunking({}, time_field)
         assert valid, "Empty query has no forbidden operators"
-        # But it's not chunkable due to missing time bounds
-        is_chunkable, reason, bounds = is_chunkable_query({}, time_field)
-        assert not is_chunkable, "Empty query should not be chunkable"
+        # But it's not chunkable due to missing time bounds - now returns SINGLE mode
+        result = is_chunkable_query({}, time_field)
+        assert (
+            result.mode == ChunkabilityMode.SINGLE
+        ), "Empty query should be SINGLE mode (no time filtering)"
+        assert result.mode in (ChunkabilityMode.PARALLEL, ChunkabilityMode.SINGLE)
 
     def test_time_field_only(self, time_field, t1, t2):
         """Only time field constraint - should be chunkable."""
@@ -1030,9 +1037,9 @@ class TestEdgeCasesDataLossPrevention:
     """
     Critical edge case tests to prevent data loss.
 
-    These tests are specifically designed to catch bugs in the
-    extract_time_bounds_recursive() function that could cause silent data loss
-    by incorrectly calculating time bounds.
+    These tests are specifically designed to catch bugs in
+    extract_time_bounds_recursive() that could cause silent data loss by
+    incorrectly calculating time bounds.
     """
 
     # -------------------------------------------------------------------------
@@ -1065,17 +1072,18 @@ class TestEdgeCasesDataLossPrevention:
             ]
         }
 
-        is_chunkable, reason, bounds = is_chunkable_query(query, time_field)
-        assert not is_chunkable, (
-            "Query with unbounded $or branch should be rejected to prevent data loss. "
-            f"Got: is_chunkable={is_chunkable}, bounds={bounds}"
+        result = is_chunkable_query(query, time_field)
+        # Changed: Now returns SINGLE mode (valid but not parallelizable)
+        assert result.mode == ChunkabilityMode.SINGLE, (
+            "Query with unbounded $or branch should return SINGLE mode "
+            "(valid but not parallelizable)"
         )
         assert (
-            "unbounded" in reason.lower() or "partial" in reason.lower()
-        ), f"Reason should mention unbounded/partial bounds: {reason}"
+            "unbounded" in result.reason.lower() or "partial" in result.reason.lower()
+        ), f"Reason should mention unbounded/partial bounds: {result.reason}"
 
     def test_or_with_all_unbounded_branches(self):
-        """$or where all branches are unbounded should be rejected."""
+        """$or where all branches are unbounded should return SINGLE mode."""
         time_field = "timestamp"
         start = datetime(2024, 1, 1, tzinfo=timezone.utc)
 
@@ -1086,13 +1094,15 @@ class TestEdgeCasesDataLossPrevention:
             ]
         }
 
-        is_chunkable, reason, bounds = is_chunkable_query(query, time_field)
+        result = is_chunkable_query(query, time_field)
         assert (
-            not is_chunkable
-        ), "Query with all unbounded $or branches should be rejected"
+            result.mode == ChunkabilityMode.SINGLE
+        ), "Query with all unbounded $or branches should be SINGLE mode"
 
     def test_or_with_mixed_partial_bounds(self):
-        """$or with branches having different partial bounds should be rejected."""
+        """$or with branches having different partial bounds should return
+        SINGLE mode.
+        """
         time_field = "timestamp"
         t = datetime(2024, 1, 1, tzinfo=timezone.utc)
 
@@ -1103,18 +1113,19 @@ class TestEdgeCasesDataLossPrevention:
             ]
         }
 
-        is_chunkable, reason, bounds = is_chunkable_query(query, time_field)
-        assert not is_chunkable, "Query with mixed partial bounds should be rejected"
+        result = is_chunkable_query(query, time_field)
+        assert (
+            result.mode == ChunkabilityMode.SINGLE
+        ), "Query with mixed partial bounds should be SINGLE mode"
 
     # -------------------------------------------------------------------------
     # CRITICAL: $or Branches Not Referencing Time Field
     # -------------------------------------------------------------------------
 
     def test_or_with_branch_not_referencing_time_field(self):
-        """$or where one branch doesn't reference time field should be rejected.
+        """$or where one branch doesn't reference time field should return SINGLE mode.
 
-        If a branch doesn't constrain the time field at all, we can't safely
-        extract bounds and chunk the query.
+        Query is valid but can't be parallelized safely.
         """
         time_field = "timestamp"
         t1 = datetime(2024, 1, 1, tzinfo=timezone.utc)
@@ -1129,13 +1140,13 @@ class TestEdgeCasesDataLossPrevention:
             ]
         }
 
-        is_chunkable, reason, bounds = is_chunkable_query(query, time_field)
+        result = is_chunkable_query(query, time_field)
         assert (
-            not is_chunkable
-        ), "Query where $or branch doesn't reference time field should be rejected"
+            result.mode == ChunkabilityMode.SINGLE
+        ), "Query where $or branch doesn't reference time field should be SINGLE mode"
 
     def test_or_with_all_branches_not_referencing_time(self):
-        """$or where no branches reference time field should be rejected."""
+        """$or where no branches reference time field should return SINGLE mode."""
         time_field = "timestamp"
 
         query = {
@@ -1145,10 +1156,10 @@ class TestEdgeCasesDataLossPrevention:
             ]
         }
 
-        is_chunkable, reason, bounds = is_chunkable_query(query, time_field)
+        result = is_chunkable_query(query, time_field)
         assert (
-            not is_chunkable
-        ), "Query with no time references in $or should be rejected"
+            result.mode == ChunkabilityMode.SINGLE
+        ), "Query with no time references in $or should be SINGLE mode"
 
     # -------------------------------------------------------------------------
     # Multiple/Conflicting Operators on Time Field
@@ -1204,7 +1215,7 @@ class TestEdgeCasesDataLossPrevention:
         assert bounds[1] == t2, f"Expected upper bound {t2}, got {bounds[1]}"
 
     def test_contradictory_bounds(self):
-        """Contradictory bounds (lower > upper) should be rejected."""
+        """Contradictory bounds (lower > upper) should return SINGLE mode."""
         time_field = "timestamp"
         t1 = datetime(2024, 2, 1, tzinfo=timezone.utc)
         t2 = datetime(2024, 1, 1, tzinfo=timezone.utc)
@@ -1216,28 +1227,30 @@ class TestEdgeCasesDataLossPrevention:
             }
         }
 
-        is_chunkable, reason, bounds = is_chunkable_query(query, time_field)
+        result = is_chunkable_query(query, time_field)
         assert (
-            not is_chunkable
-        ), "Query with contradictory bounds (lo > hi) should be rejected"
+            result.mode == ChunkabilityMode.SINGLE
+        ), "Query with contradictory bounds (lo > hi) should be SINGLE mode"
         assert (
-            "invalid" in reason.lower() or "contradiction" in reason.lower()
-        ), f"Reason should mention invalid/contradictory bounds: {reason}"
+            "invalid" in result.reason.lower() or "contradict" in result.reason.lower()
+        ), f"Reason should mention invalid/contradictory bounds: {result.reason}"
 
     # -------------------------------------------------------------------------
     # Empty Arrays and Operators
     # -------------------------------------------------------------------------
 
     def test_in_with_empty_array(self):
-        """$in with empty array should be rejected (matches no documents)."""
+        """$in with empty array should return SINGLE mode (matches no documents)."""
         time_field = "timestamp"
         t1 = datetime(2024, 1, 1, tzinfo=timezone.utc)
         t2 = datetime(2024, 2, 1, tzinfo=timezone.utc)
 
         query = {time_field: {"$gte": t1, "$lt": t2, "$in": []}}
 
-        is_chunkable, reason, bounds = is_chunkable_query(query, time_field)
-        assert not is_chunkable, "Query with empty $in array should be rejected"
+        result = is_chunkable_query(query, time_field)
+        assert (
+            result.mode == ChunkabilityMode.SINGLE
+        ), "Query with empty $in array should be SINGLE mode"
 
     def test_or_with_empty_array(self):
         """$or with empty array should be rejected (matches no documents)."""
@@ -1301,9 +1314,6 @@ class TestEdgeCasesDataLossPrevention:
         # If done correctly, should get (t3, t2) which is invalid
         if is_chunkable:
             # If it passes, bounds should at least be sensible
-            assert (
-                bounds is not None and bounds[0] is not None and bounds[1] is not None
-            ), "Bounds should exist if query is chunkable"
             assert bounds[0] < bounds[1], "Bounds should be valid if query is chunkable"
         else:
             # Ideally should be rejected due to contradiction
@@ -1314,7 +1324,9 @@ class TestEdgeCasesDataLossPrevention:
     # -------------------------------------------------------------------------
 
     def test_ne_on_time_field(self):
-        """$ne on time field should be rejected (can't safely bound)."""
+        """$ne on time field should return SINGLE mode (can't safely bound
+        but valid).
+        """
         time_field = "timestamp"
         t1 = datetime(2024, 1, 1, tzinfo=timezone.utc)
         t2 = datetime(2024, 2, 1, tzinfo=timezone.utc)
@@ -1327,15 +1339,19 @@ class TestEdgeCasesDataLossPrevention:
             }
         }
 
-        # $ne on time field should be caught by negation safety check
-        is_chunkable, reason, bounds = is_chunkable_query(query, time_field)
-        assert not is_chunkable, "$ne on time field should be rejected"
+        # $ne on time field returns SINGLE mode
+        result = is_chunkable_query(query, time_field)
         assert (
-            "negation" in reason.lower() or "$ne" in reason
-        ), f"Reason should mention negation: {reason}"
+            result.mode == ChunkabilityMode.SINGLE
+        ), "$ne on time field should be SINGLE mode"
+        assert (
+            "negation" in result.reason.lower() or "$ne" in result.reason
+        ), f"Reason should mention negation: {result.reason}"
 
     def test_nin_on_time_field(self):
-        """$nin on time field should be rejected (can't safely bound)."""
+        """$nin on time field should return SINGLE mode (can't safely bound
+        but valid).
+        """
         time_field = "timestamp"
         t1 = datetime(2024, 1, 1, tzinfo=timezone.utc)
         t2 = datetime(2024, 2, 1, tzinfo=timezone.utc)
@@ -1348,11 +1364,13 @@ class TestEdgeCasesDataLossPrevention:
             }
         }
 
-        is_chunkable, reason, bounds = is_chunkable_query(query, time_field)
-        assert not is_chunkable, "$nin on time field should be rejected"
+        result = is_chunkable_query(query, time_field)
         assert (
-            "negation" in reason.lower() or "$nin" in reason
-        ), f"Reason should mention negation: {reason}"
+            result.mode == ChunkabilityMode.SINGLE
+        ), "$nin on time field should be SINGLE mode"
+        assert (
+            "negation" in result.reason.lower() or "$nin" in result.reason
+        ), f"Reason should mention negation: {result.reason}"
 
     def test_not_on_time_field(self):
         """$not on time field should be rejected."""
@@ -1389,10 +1407,11 @@ class TestEdgeCasesDataLossPrevention:
             ]
         }
 
-        is_chunkable, reason, bounds = is_chunkable_query(query, time_field)
+        result = is_chunkable_query(query, time_field)
+        # Changed to expect SINGLE mode (valid but not parallelizable)
         assert (
-            not is_chunkable
-        ), "Complex $or with mixed bound types should be rejected to prevent data loss"
+            result.mode == ChunkabilityMode.SINGLE
+        ), "Complex $or with mixed bound types should return SINGLE mode"
 
     def test_nested_and_or_with_partial_bounds(self):
         """Nested $and/$or where some paths have partial time bounds."""
@@ -1412,7 +1431,351 @@ class TestEdgeCasesDataLossPrevention:
             ]
         }
 
-        is_chunkable, reason, bounds = is_chunkable_query(query, time_field)
+        result = is_chunkable_query(query, time_field)
+        # Changed to expect SINGLE mode (not REJECT) for unbounded $or
         assert (
-            not is_chunkable
-        ), "Nested query with unbounded $or branch should be rejected"
+            result.mode == ChunkabilityMode.SINGLE
+        ), "Nested query with unbounded $or branch should return SINGLE mode"
+
+
+# =============================================================================
+# Test Class: Three-Tier Graceful Degradation (PARALLEL/SINGLE/REJECT)
+# =============================================================================
+
+
+class TestThreeTierGracefulDegradation:
+    """
+    Test the three-tier graceful degradation system.
+
+    Modes:
+    - PARALLEL: Safe for parallel time-chunked execution
+    - SINGLE: Valid query, single-worker fallback
+    - REJECT: Would produce incorrect results
+    """
+
+    # -------------------------------------------------------------------------
+    # Test ChunkabilityMode and ChunkabilityResult Types
+    # -------------------------------------------------------------------------
+
+    def test_chunkability_mode_enum_values(self):
+        """ChunkabilityMode should have three values."""
+        assert ChunkabilityMode.PARALLEL.value == "parallel"
+        assert ChunkabilityMode.SINGLE.value == "single"
+        assert ChunkabilityMode.REJECT.value == "reject"
+
+    def test_chunkability_result_structure(self):
+        """ChunkabilityResult should have correct structure."""
+        t1 = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        t2 = datetime(2024, 2, 1, tzinfo=timezone.utc)
+
+        result = ChunkabilityResult(
+            mode=ChunkabilityMode.PARALLEL, reason="", bounds=(t1, t2)
+        )
+
+        assert result.mode == ChunkabilityMode.PARALLEL
+        assert result.reason == ""
+        assert result.bounds == (t1, t2)
+
+    def test_chunkability_result_mode_property(self):
+        """Mode should correctly identify PARALLEL vs non-PARALLEL."""
+        parallel = ChunkabilityResult(ChunkabilityMode.PARALLEL, "", (None, None))
+        single = ChunkabilityResult(ChunkabilityMode.SINGLE, "reason", (None, None))
+        reject = ChunkabilityResult(ChunkabilityMode.REJECT, "reason", (None, None))
+
+        assert parallel.mode == ChunkabilityMode.PARALLEL
+        assert single.mode == ChunkabilityMode.SINGLE
+        assert reject.mode == ChunkabilityMode.REJECT
+
+    def test_chunkability_result_mode_values(self):
+        """Mode should correctly identify all three ChunkabilityMode values."""
+        parallel = ChunkabilityResult(ChunkabilityMode.PARALLEL, "", (None, None))
+        single = ChunkabilityResult(ChunkabilityMode.SINGLE, "reason", (None, None))
+        reject = ChunkabilityResult(ChunkabilityMode.REJECT, "reason", (None, None))
+
+        assert parallel.mode in (ChunkabilityMode.PARALLEL, ChunkabilityMode.SINGLE)
+        assert single.mode in (ChunkabilityMode.PARALLEL, ChunkabilityMode.SINGLE)
+        assert reject.mode == ChunkabilityMode.REJECT
+
+    # -------------------------------------------------------------------------
+    # Test has_natural_sort() Function
+    # -------------------------------------------------------------------------
+
+    def test_has_natural_sort_with_natural(self):
+        """Should detect $natural sort."""
+        sort_spec = [("$natural", 1)]
+        assert has_natural_sort(sort_spec) is True
+
+        sort_spec = [("$natural", -1)]
+        assert has_natural_sort(sort_spec) is True
+
+    def test_has_natural_sort_mixed(self):
+        """Should detect $natural even when mixed with other fields."""
+        sort_spec = [("timestamp", 1), ("$natural", 1)]
+        assert has_natural_sort(sort_spec) is True
+
+    def test_has_natural_sort_no_natural(self):
+        """Should return False for non-$natural sorts."""
+        sort_spec = [("timestamp", 1)]
+        assert has_natural_sort(sort_spec) is False
+
+        sort_spec = [("timestamp", 1), ("value", -1)]
+        assert has_natural_sort(sort_spec) is False
+
+    def test_has_natural_sort_empty(self):
+        """Should return False for empty sort."""
+        assert has_natural_sort([]) is False
+        assert has_natural_sort(None) is False
+
+    # -------------------------------------------------------------------------
+    # Test PARALLEL Mode (Safe for Parallelization)
+    # -------------------------------------------------------------------------
+
+    def test_parallel_mode_basic_query(self):
+        """Basic query with time bounds should be PARALLEL."""
+        time_field = "timestamp"
+        t1 = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        t2 = datetime(2024, 2, 1, tzinfo=timezone.utc)
+
+        query = {time_field: {"$gte": t1, "$lt": t2}, "status": "active"}
+
+        result = is_chunkable_query(query, time_field)
+        assert result.mode == ChunkabilityMode.PARALLEL
+        assert result.reason == ""
+        assert result.bounds == (t1, t2)
+
+    def test_parallel_mode_or_query_bounded(self):
+        """$or query with all branches bounded should be PARALLEL."""
+        time_field = "timestamp"
+        t1 = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        t2 = datetime(2024, 2, 1, tzinfo=timezone.utc)
+
+        query = {
+            "$or": [
+                {"region_id": "A", time_field: {"$gte": t1, "$lt": t2}},
+                {"region_id": "B", time_field: {"$gte": t1, "$lt": t2}},
+            ]
+        }
+
+        result = is_chunkable_query(query, time_field)
+        assert result.mode == ChunkabilityMode.PARALLEL
+        assert result.bounds == (t1, t2)
+
+    # -------------------------------------------------------------------------
+    # Test SINGLE Mode (Valid but Single-Worker Fallback)
+    # -------------------------------------------------------------------------
+
+    def test_single_mode_natural_sort(self):
+        """$natural sort should return SINGLE mode."""
+        time_field = "timestamp"
+        t1 = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        t2 = datetime(2024, 2, 1, tzinfo=timezone.utc)
+
+        query = {time_field: {"$gte": t1, "$lt": t2}}
+        sort_spec = [("$natural", 1)]
+
+        result = is_chunkable_query(query, time_field, sort_spec)
+        assert result.mode == ChunkabilityMode.SINGLE
+        assert "$natural sort" in result.reason
+        assert result.mode in (ChunkabilityMode.PARALLEL, ChunkabilityMode.SINGLE)
+
+    def test_single_mode_no_time_reference(self):
+        """Query with no time field reference should be SINGLE."""
+        time_field = "timestamp"
+        query = {"status": "active", "value": {"$gt": 100}}
+
+        result = is_chunkable_query(query, time_field)
+        assert result.mode == ChunkabilityMode.SINGLE
+        assert "no time field reference" in result.reason
+        assert result.mode in (ChunkabilityMode.PARALLEL, ChunkabilityMode.SINGLE)
+
+    def test_single_mode_unbounded_or_branch(self):
+        """$or with unbounded branch should be SINGLE."""
+        time_field = "timestamp"
+        t1 = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        t2 = datetime(2024, 2, 1, tzinfo=timezone.utc)
+
+        query = {
+            "$or": [
+                {"region_id": "A", time_field: {"$gte": t1, "$lt": t2}},
+                {"region_id": "B"},  # No time constraint
+            ]
+        }
+
+        result = is_chunkable_query(query, time_field)
+        assert result.mode == ChunkabilityMode.SINGLE
+        assert "$or query has unbounded" in result.reason
+        assert result.mode in (ChunkabilityMode.PARALLEL, ChunkabilityMode.SINGLE)
+
+    def test_single_mode_partial_time_bounds(self):
+        """Query with only $gte or only $lt should be SINGLE."""
+        time_field = "timestamp"
+        t1 = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+        # Only lower bound
+        query = {time_field: {"$gte": t1}}
+        result = is_chunkable_query(query, time_field)
+        assert result.mode == ChunkabilityMode.SINGLE
+        assert "no complete time range" in result.reason
+
+        # Only upper bound
+        query = {time_field: {"$lt": t1}}
+        result = is_chunkable_query(query, time_field)
+        assert result.mode == ChunkabilityMode.SINGLE
+        assert "no complete time range" in result.reason
+
+    # -------------------------------------------------------------------------
+    # Test REJECT Mode (Would Produce Incorrect Results)
+    # -------------------------------------------------------------------------
+
+    def test_reject_mode_expr_operator(self):
+        """$expr operator should return SINGLE mode (can execute, just not
+        parallelize).
+        """
+        time_field = "timestamp"
+        t1 = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        t2 = datetime(2024, 2, 1, tzinfo=timezone.utc)
+
+        query = {time_field: {"$gte": t1, "$lt": t2}, "$expr": {"$gt": ["$a", "$b"]}}
+
+        result = is_chunkable_query(query, time_field)
+        assert result.mode == ChunkabilityMode.SINGLE
+        assert "$expr" in result.reason
+        assert result.mode in (ChunkabilityMode.PARALLEL, ChunkabilityMode.SINGLE)
+        assert result.bounds == (t1, t2)
+
+    def test_reject_mode_text_search(self):
+        """$text operator should return SINGLE mode (can execute, just not
+        parallelize).
+        """
+        time_field = "timestamp"
+        t1 = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        t2 = datetime(2024, 2, 1, tzinfo=timezone.utc)
+
+        query = {time_field: {"$gte": t1, "$lt": t2}, "$text": {"$search": "mongodb"}}
+
+        result = is_chunkable_query(query, time_field)
+        assert result.mode == ChunkabilityMode.SINGLE
+        assert "$text" in result.reason
+        assert result.mode in (ChunkabilityMode.PARALLEL, ChunkabilityMode.SINGLE)
+        assert result.bounds == (t1, t2)
+
+    def test_reject_mode_near_geospatial(self):
+        """$near operator should return SINGLE mode (can execute, just not
+        parallelize).
+        """
+        time_field = "timestamp"
+        t1 = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        t2 = datetime(2024, 2, 1, tzinfo=timezone.utc)
+
+        query = {
+            time_field: {"$gte": t1, "$lt": t2},
+            "location": {
+                "$near": {
+                    "$geometry": {"type": "Point", "coordinates": [0, 0]},
+                    "$maxDistance": 1000,
+                }
+            },
+        }
+
+        result = is_chunkable_query(query, time_field)
+        assert result.mode == ChunkabilityMode.SINGLE
+        assert "$near" in result.reason
+        assert result.mode in (ChunkabilityMode.PARALLEL, ChunkabilityMode.SINGLE)
+        assert result.bounds == (t1, t2)
+
+    def test_reject_mode_nested_or(self):
+        """Nested $or (depth > 1) should return SINGLE mode (complex but executable)."""
+        time_field = "timestamp"
+        t1 = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        t2 = datetime(2024, 2, 1, tzinfo=timezone.utc)
+
+        query = {
+            time_field: {"$gte": t1, "$lt": t2},
+            "$or": [{"$or": [{"a": 1}, {"b": 2}]}, {"c": 3}],
+        }
+
+        result = is_chunkable_query(query, time_field)
+        assert result.mode == ChunkabilityMode.SINGLE
+        assert "nested $or" in result.reason
+        assert result.mode in (ChunkabilityMode.PARALLEL, ChunkabilityMode.SINGLE)
+        assert result.bounds == (t1, t2)
+
+    # -------------------------------------------------------------------------
+    # Test Backwards Compatibility
+    # -------------------------------------------------------------------------
+
+    def test_backwards_compatible_parallel(self):
+        """PARALLEL mode should work with old is_chunkable checks."""
+        time_field = "timestamp"
+        t1 = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        t2 = datetime(2024, 2, 1, tzinfo=timezone.utc)
+
+        query = {time_field: {"$gte": t1, "$lt": t2}}
+        result = is_chunkable_query(query, time_field)
+
+        # Check mode directly
+        assert result.mode == ChunkabilityMode.PARALLEL
+
+        # Old code expected tuple - we provide properties
+        mode = result.mode
+        assert mode == ChunkabilityMode.PARALLEL
+
+    def test_backwards_compatible_reject(self):
+        """REJECT mode should work with old is_chunkable checks (use empty
+        $or for true REJECT).
+        """
+        time_field = "timestamp"
+        # Use empty $or which is invalid MongoDB syntax
+        query = {"$or": []}
+        result = is_chunkable_query(query, time_field)
+
+        # Check mode directly
+        assert result.mode == ChunkabilityMode.REJECT
+
+    # -------------------------------------------------------------------------
+    # Edge Cases and Complex Scenarios
+    # -------------------------------------------------------------------------
+
+    def test_single_mode_natural_sort_descending(self):
+        """$natural sort descending should also be SINGLE."""
+        time_field = "timestamp"
+        t1 = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        t2 = datetime(2024, 2, 1, tzinfo=timezone.utc)
+
+        query = {time_field: {"$gte": t1, "$lt": t2}}
+        sort_spec = [("$natural", -1)]
+
+        result = is_chunkable_query(query, time_field, sort_spec)
+        assert result.mode == ChunkabilityMode.SINGLE
+        assert result.mode in (ChunkabilityMode.PARALLEL, ChunkabilityMode.SINGLE)
+
+    def test_reject_trumps_single(self):
+        """True REJECT (empty $or) takes precedence over SINGLE mode conditions."""
+        time_field = "timestamp"
+
+        # Query with empty $or (REJECT) and $natural sort (SINGLE)
+        query = {"$or": []}
+        sort_spec = [("$natural", 1)]
+
+        result = is_chunkable_query(query, time_field, sort_spec)
+        # Should reject because of empty $or
+        assert result.mode == ChunkabilityMode.REJECT
+        assert result.mode == ChunkabilityMode.REJECT
+
+    def test_single_mode_or_with_mixed_bounds(self):
+        """$or with some bounded and some unbounded branches is SINGLE."""
+        time_field = "timestamp"
+        t1 = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        t2 = datetime(2024, 2, 1, tzinfo=timezone.utc)
+
+        query = {
+            "$or": [
+                {time_field: {"$gte": t1, "$lt": t2}, "region": "A"},
+                {time_field: {"$gte": t1}, "region": "B"},  # Only lower bound
+                {"region": "C"},  # No time constraint
+            ]
+        }
+
+        result = is_chunkable_query(query, time_field)
+        assert result.mode == ChunkabilityMode.SINGLE
+        assert result.mode in (ChunkabilityMode.PARALLEL, ChunkabilityMode.SINGLE)
