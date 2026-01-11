@@ -68,13 +68,20 @@ WHY BRACKETS?
 ================================================================================
 """
 
+import json
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from src.xlr8.analysis.inspector import (
+    ChunkabilityMode,
     extract_time_bounds_recursive,
+    has_forbidden_ops,
+    is_chunkable_query,
+    normalize_query,
+    or_depth,
+    split_global_and,
 )
 
 # =============================================================================
@@ -580,3 +587,541 @@ def _check_or_branch_safety(
         return True, "", None
 
     return True, "", transformed
+
+
+# ============================================================================
+# MAIN INTERFACE/ ENTRY Point
+# ============================================================================
+
+
+def _json_key(d: Dict[str, Any]) -> str:
+    """Create a deterministic JSON key for deduplication."""
+    return json.dumps(d, sort_keys=True, default=str)
+
+
+def _merge_full_ranges(ranges: List[TimeRange]) -> List[TimeRange]:
+    """Merge overlapping or adjacent time ranges into consolidated spans.
+
+    Sorts ranges by start time, then iterates through merging any
+    that overlap or touch (end of one equals start of next).
+    """
+
+    rs = [r for r in ranges if r.is_full and r.lo and r.hi]
+    if not rs:
+        return []
+
+    rs.sort(key=lambda r: r.lo)  # type: ignore[arg-type]
+    out: List[TimeRange] = [TimeRange(rs[0].lo, rs[0].hi, True)]
+    for r in rs[1:]:
+        last = out[-1]
+        # Type assertions: we filtered for r.lo and r.hi being not None above
+        assert r.lo is not None and r.hi is not None
+        assert last.lo is not None and last.hi is not None
+        if r.lo <= last.hi:  # overlap or touch
+            if r.hi > last.hi:
+                last.hi = r.hi
+        else:
+            out.append(TimeRange(r.lo, r.hi, True))
+    return out
+
+
+def _partial_covers_full(partial: TimeRange, full: TimeRange) -> bool:
+    """Check if a partial time range completely covers a full time range.
+
+    A partial range covers a full range if:
+    - partial has only $gte (lo) and full.lo >= partial.lo
+    - partial has only $lt (hi) and full.hi <= partial.hi
+
+    Args:
+        partial: TimeRange with is_full=False (missing lo or hi)
+        full: TimeRange with is_full=True
+
+    Returns:
+        True if partial completely covers full, False otherwise
+    """
+    if full.lo is None or full.hi is None:
+        return False
+
+    # Partial has only lower bound ($gte): covers if full starts at or after
+    if partial.lo is not None and partial.hi is None:
+        return full.lo >= partial.lo
+
+    # Partial has only upper bound ($lt): covers if full ends at or before
+    if partial.lo is None and partial.hi is not None:
+        return full.hi <= partial.hi
+
+    return False
+
+
+def _merge_partial_ranges(partials: List[TimeRange]) -> List[TimeRange]:
+    """Merge partial ranges where possible.
+
+    Priority:
+    - If ANY range is completely unbounded (no lo, no hi), it covers everything
+    - Two $gte-only: keep the one with smallest lo (covers most)
+    - Two $lt-only: keep the one with largest hi (covers most)
+    """
+    if not partials:
+        return []
+
+    # Check for completely unbounded ranges first - they cover everything
+    unbounded = [r for r in partials if r.lo is None and r.hi is None]
+    if unbounded:
+        # One unbounded range covers all other partials
+        return [TimeRange(None, None, False)]
+
+    gte_only = [r for r in partials if r.lo is not None and r.hi is None]
+    lt_only = [r for r in partials if r.lo is None and r.hi is not None]
+
+    merged: List[TimeRange] = []
+
+    # For $gte-only, keep the smallest lo (covers most data)
+    assert gte_only or lt_only, "No partial ranges to merge"
+
+    if gte_only:
+        # Filter out None values for type safety
+        min_lo = min(r.lo for r in gte_only if r.lo is not None)
+        merged.append(TimeRange(min_lo, None, False))
+
+    # For $lt-only, keep the largest hi (covers most data)
+    if lt_only:
+        max_hi = max(r.hi for r in lt_only if r.hi is not None)
+        merged.append(TimeRange(None, max_hi, False))
+
+    return merged
+
+
+def build_brackets_for_find(
+    query: Dict[str, Any],
+    time_field: str,
+    sort_spec: Optional[List[Tuple[str, int]]] = None,
+) -> Tuple[
+    bool, str, List[Bracket], Optional[Tuple[Optional[datetime], Optional[datetime]]]
+]:
+    """
+    Build bracket list for a find() query based on its chunkability.
+
+    This is the SINGLE ENTRY POINT for bracket creation. All queries flow through
+    here to ensure consistent validation and bracket generation.
+
+    IMPORTANT: Internally calls is_chunkable_query() to validate the query and
+    determine execution mode (PARALLEL/SINGLE/REJECT). Cursor methods should NOT
+    call is_chunkable_query() separately - this function handles all validation.
+
+    Args:
+        query: MongoDB find() filter dict
+        time_field: Name of the timestamp field used for time-based chunking
+                   (e.g., "timestamp", "recordedAt", "createdAt")
+        sort_spec: Optional MongoDB sort specification as list of
+                   (field, direction) tuples. Required for detecting $natural
+                   sort. Format: [("field", 1)] or [("field", -1)]
+                   Example: [("timestamp", 1)] or [("$natural", -1)]
+
+    Returns:
+        Tuple of (is_chunkable, reason, brackets, bounds):
+
+        - is_chunkable: bool
+            - True: Query is valid and executable (PARALLEL or SINGLE mode)
+            - False: Invalid query syntax or contradictory constraints (REJECT mode)
+
+        - reason: str
+            - Empty string "" for PARALLEL mode (successful parallelization)
+            - Descriptive message for SINGLE mode
+              (e.g., "$natural sort requires insertion order")
+            - Error description for REJECT mode
+              (e.g., "empty $or array (invalid MongoDB syntax)")
+
+        - brackets: List[Bracket]
+            - PARALLEL mode: Non-empty list of Bracket objects for parallel execution
+            - SINGLE mode: Empty list [] (signals to use single worker)
+            - REJECT mode: Empty list []
+
+        - bounds: Tuple[Optional[datetime], Optional[datetime]]
+            - Time range extracted from query (lo, hi)
+            - (None, None) if no time bounds found or query rejected
+
+    CRITICAL: Empty brackets list has TWO meanings:
+        1. If is_chunkable=True + brackets=[]: SINGLE mode (valid, use single worker)
+        2. If is_chunkable=False + brackets=[]: REJECT mode (invalid, don't execute)
+
+    Callers MUST check is_chunkable first, then interpret empty brackets accordingly.
+
+    Example:
+        >>> query = {
+        ...     "$or": [
+        ...         {"region_id": ObjectId("64a...")},
+        ...         {"region_id": ObjectId("64b...")},
+        ...     ],
+        ...     "account_id": ObjectId("123..."),
+        ...     "timestamp": {"$gte": datetime(2024,1,1), "$lt": datetime(2024,7,1)}
+        ... }
+        >>> ok, reason, brackets, bounds = build_brackets_for_find(query, "timestamp")
+        >>> # Returns:
+        >>> # (True, "", [
+        >>> #     Bracket(static_filter={"account_id": "123...",
+        >>> #                            "region_id": "64a..."},
+        >>> #             timerange=TimeRange(lo=2024-01-01, hi=2024-07-01,
+        >>> #                                 is_full=True)),
+        >>> #     Bracket(static_filter={"account_id": "123...",
+        >>> #                            "region_id": "64b..."},
+        >>> #             timerange=TimeRange(lo=2024-01-01, hi=2024-07-01,
+        >>> #                                 is_full=True)),
+        >>> # ], (datetime(2024,1,1), datetime(2024,7,1)))
+
+    Rejection Cases (returns is_chunkable=False):
+        - Empty $or array (invalid MongoDB syntax) → REJECT
+        - Contradictory time bounds (lo >= hi) → REJECT
+
+    Single-Worker Cases (returns is_chunkable=True, empty brackets):
+        - $natural sort (insertion order) → SINGLE
+        - Forbidden operators ($expr, $text, $near, etc.) → SINGLE
+        - Nested $or (depth > 1) → SINGLE
+        - Time field negation ($ne/$nin/$not/$nor on time field) → SINGLE
+        - Unbounded $or branches → SINGLE
+        - No time field reference → SINGLE
+
+    Implementation Note - Multiple Time Bounds Extraction:
+        This function calls extract_time_bounds_recursive() multiple times in different
+        code paths for different purposes:
+
+        1. Via is_chunkable_query() - Validates overall query has time bounds
+           Returns: result.bounds = union of all time ranges in query
+
+        2. In _check_or_branch_safety() - Checks if $or branches have
+           identical time bounds
+           Purpose: Overlapping $in values can only be safely transformed
+                   when all branches have the SAME time range. Different
+                   ranges would cause data loss.
+           Example: Branch A [Jan 1-15] with IDs {1,2,3} vs Branch B
+                   [Jan 10-31] with IDs {2,3,4}. Cannot remove overlap {2,3}
+                   because documents in [Jan 1-10) would be lost!
+
+        3. In merge attempt (unsafe $or handling) - Extracts bounds from
+           each branch
+           Purpose: If branches have overlapping results (unsafe), check if
+                   they can be merged into a single bracket. Only possible if
+                   time ranges are contiguous with no gaps.
+           Example: Branch A [Jan 1-15], Branch B [Jan 10-20]
+                   → Merged [Jan 1-20] ✓
+                   Branch A [Jan 1-15], Branch B [Jan 20-31]
+                   → Cannot merge (gap!) ✗
+
+        4. In final bracket creation - Sets TimeRange for each output
+           bracket
+           Purpose: Each bracket needs its specific time range for chunking.
+           Example: {"sensor": "A", ts: [Jan 1-15]}
+                   → Bracket with TimeRange(Jan 1, Jan 15)
+                   {"sensor": "B", ts: [Feb 1-28]}
+                   → Bracket with TimeRange(Feb 1, Feb 28)
+
+        Why multiple calls are necessary:
+        - is_chunkable_query() returns UNION of time bounds (overall range)
+        - Each $or branch may have DIFFERENT time bounds (per-branch ranges)
+        - Safety checks need to compare bounds across branches (identical?)
+        - Merge logic needs to check contiguity (adjacent/overlapping?)
+        - Final brackets need their specific ranges (individual TimeRange objects)
+
+        This is NOT redundant - each extraction serves a different purpose in the
+        validation → optimization → construction pipeline.
+    """
+
+    # PHASE 0: Validate query using is_chunkable_query
+    # This is now the ONLY validation point - cursor methods don't need to
+    # call it separately
+    result = is_chunkable_query(query, time_field, sort_spec)
+
+    bounds = result.bounds
+    3
+    # Handle REJECT mode - invalid query syntax or contradictory constraints
+    if result.mode == ChunkabilityMode.REJECT:
+        return False, result.reason, [], (None, None)
+
+    # Handle SINGLE mode - valid query, but single-worker fallback needed
+    if result.mode == ChunkabilityMode.SINGLE:
+        # Return empty brackets as signal to use single worker
+        # is_chunkable=True means query is VALID and executable
+        # Empty brackets means "don't parallelize, use single worker"
+        return True, result.reason, [], bounds
+
+    # =========================================================================
+    # DEFENSE-IN-DEPTH: Redundant safety checks
+    # =========================================================================
+    # These checks duplicate validation already done in is_chunkable_query().
+    # They're kept as a safety net in case:
+    # 1. is_chunkable_query() has a bug and returns PARALLEL incorrectly
+    # 2. Future code changes bypass is_chunkable_query() validation
+    # 3. Query is mutated between validation and bracket building
+    #
+    # PARANOID but JUSTIFIED: Better to catch issues twice than produce
+    # incorrect results. These checks are fast and prevent data corruption.
+    # =========================================================================
+
+    # High-level safety checks (kept for defense-in-depth)
+    has_forbidden, forbidden_op = has_forbidden_ops(query)
+    if has_forbidden:
+        return False, f"forbidden-operator: {forbidden_op}", [], (None, None)
+
+    # PHASE 1: Normalize query (flatten nested $and, detect complexity)
+    normalized, complexity_flags = normalize_query(query)
+
+    # Use normalized query for all subsequent operations
+    global_and, or_list = split_global_and(normalized)
+
+    # Check for nested $or or multiple $or
+    if complexity_flags["nested_or"]:
+        return False, "nested-or-depth>1", [], (None, None)
+
+    if or_depth(normalized) > 1:
+        return False, "nested-or-depth>1", [], (None, None)
+
+    # No $or: treat as single branch represented by global_and
+    if not or_list:
+        branches: List[Dict[str, Any]] = [global_and]
+    else:
+        # =====================================================================
+        # SAFETY CHECK: Detect overlapping $or branches
+        # =====================================================================
+        # Before splitting $or into independent brackets, we must verify that
+        # branches don't have overlapping result sets. Overlap causes duplicates.
+        #
+        # Cases that cause overlap:
+        # - Negation operators ($nin, $ne, $not, $nor) in any branch
+        # - Overlapping $in values across branches
+        # - Different field sets (can't determine disjointness)
+        #
+        # If overlap is detected and cannot be transformed, we return a single
+        # bracket covering the entire query (executed as unchunked).
+        # =====================================================================
+        is_safe, reason, transformed = _check_or_branch_safety(
+            or_list, global_and, time_field
+        )
+
+        if not is_safe:
+            # Unsafe $or pattern detected - but check if we can MERGE branches
+            #
+            # OPTIMIZATION: If all branches have IDENTICAL static filters
+            # (excluding time), AND their time ranges are contiguous (no gaps),
+            # we can MERGE them into a single bracket with the union of time
+            # ranges.
+            #
+            # Example (mergeable - overlapping):
+            #   $or: [
+            #     {filter_A, timestamp: {$gte: Jan 1, $lt: Jan 20}},
+            #     {filter_A, timestamp: {$gte: Jan 15, $lt: Feb 1}},
+            #   ]
+            #   → Merged: {filter_A, timestamp: {$gte: Jan 1, $lt: Feb 1}}
+            #
+            # Example (NOT mergeable - disjoint with gap):
+            #   $or: [
+            #     {filter_A, timestamp: {$gte: Jan 1, $lt: Jan 15}},
+            #     {filter_A, timestamp: {$gte: Feb 1, $lt: Feb 15}},
+            #   ]
+            #   → Cannot merge! Gap from Jan 15 to Feb 1 would include unwanted data.
+            #   → Fall back to single bracket with full $or query.
+
+            # Extract static filters (without time) from each branch
+            static_filters = []
+            time_bounds_list = []
+            has_unbounded_branch = False
+            has_partial_branch = False  # Only $gte or only $lt
+
+            for branch in or_list:
+                combined = {**global_and, **branch}
+                bounds, _ = extract_time_bounds_recursive(combined, time_field)
+                if bounds is None:
+                    branch_lo, branch_hi = None, None
+                else:
+                    branch_lo, branch_hi = bounds
+
+                # Check if this branch has NO time constraint at all
+                if branch_lo is None and branch_hi is None:
+                    has_unbounded_branch = True
+                # Check if partial (only one bound)
+                elif branch_lo is None or branch_hi is None:
+                    has_partial_branch = True
+
+                time_bounds_list.append((branch_lo, branch_hi))
+
+                # Extract static filter (without time)
+                static_wo_time = dict(combined)
+                if time_field in static_wo_time:
+                    static_wo_time.pop(time_field)
+                static_filters.append(static_wo_time)
+
+            # Check if all static filters are identical
+            all_static_identical = all(
+                _json_key(sf) == _json_key(static_filters[0])
+                for sf in static_filters[1:]
+            )
+
+            # Can only merge if:
+            # 1. All static filters identical
+            # 2. All time ranges are FULL (both lo and hi)
+            # 3. Time ranges are contiguous (no gaps)
+            can_merge = False
+            merged_lo, merged_hi = None, None
+
+            if (
+                all_static_identical
+                and not has_unbounded_branch
+                and not has_partial_branch
+            ):
+                # All branches have identical static filters and full time ranges
+                # Check if time ranges are contiguous (no gaps)
+                #
+                # Algorithm: Sort by start time, then verify each range starts
+                # at or before the previous range's end (overlap or adjacent)
+                full_ranges = [(lo, hi) for lo, hi in time_bounds_list]
+                sorted_ranges = sorted(full_ranges, key=lambda r: r[0])
+
+                # Start with first range
+                running_lo = sorted_ranges[0][0]
+                running_hi = sorted_ranges[0][1]
+                has_gap = False
+
+                for lo, hi in sorted_ranges[1:]:
+                    if lo > running_hi:
+                        # Gap detected! This range starts after the previous ends
+                        has_gap = True
+                        break
+                    # Extend running_hi if this range extends further
+                    running_hi = max(running_hi, hi)
+
+                if not has_gap:
+                    # All ranges are contiguous - we can merge!
+                    merged_lo = running_lo
+                    merged_hi = running_hi
+                    can_merge = True
+
+            if can_merge:
+                # Merge into single clean bracket
+                return (
+                    True,
+                    f"merged-branches:{reason}",
+                    [
+                        Bracket(
+                            static_filter=static_filters[0],
+                            timerange=TimeRange(merged_lo, merged_hi, True),
+                        )
+                    ],
+                    (merged_lo, merged_hi),
+                )
+
+            # Cannot merge - fall back to single bracket with full $or
+            # This preserves the original $or semantics
+            lo, hi = None, None
+
+            for branch_lo, branch_hi in time_bounds_list:
+                if branch_lo is not None:
+                    lo = branch_lo if lo is None else min(lo, branch_lo)
+                if branch_hi is not None:
+                    hi = branch_hi if hi is None else max(hi, branch_hi)
+
+            # If any branch is unbounded, the whole query is unbounded
+            if has_unbounded_branch:
+                lo, hi = None, None
+
+            # Build the single bracket with original query structure
+            single_filter = dict(query)
+            if time_field in single_filter:
+                single_filter.pop(time_field)
+
+            is_full = lo is not None and hi is not None
+            return (
+                True,
+                f"single-bracket:{reason}",
+                [
+                    Bracket(
+                        static_filter=single_filter,
+                        timerange=TimeRange(lo, hi, is_full),
+                    )
+                ],
+                (lo, hi),
+            )
+
+        # Use transformed branches if available
+        branches = transformed if transformed else or_list
+
+    prelim: List[Bracket] = []
+    for br in branches:
+        if not isinstance(br, Dict):
+            return False, "branch-not-dict", [], (None, None)
+
+        eff: Dict[str, Any] = {}
+        if global_and:
+            eff.update(global_and)
+        eff.update(br)
+
+        bounds, _ = extract_time_bounds_recursive(eff, time_field)
+        if bounds is None:
+            lo, hi = None, None
+        else:
+            lo, hi = bounds
+        is_full = lo is not None and hi is not None
+
+        # Remove time field from static filter
+        static_wo_time = dict(eff)
+        if time_field in static_wo_time:
+            static_wo_time.pop(time_field)
+
+        if "$or" in static_wo_time:
+            return False, "nested-or-in-branch", [], (None, None)
+
+        prelim.append(
+            Bracket(static_filter=static_wo_time, timerange=TimeRange(lo, hi, is_full))
+        )
+
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for b in prelim:
+        key = _json_key(b.static_filter)
+        g = grouped.get(key)
+        if g is None:
+            g = {"static": b.static_filter, "full": [], "partial": []}
+            grouped[key] = g
+        (g["full"] if b.timerange.is_full else g["partial"]).append(b.timerange)
+
+    out_brackets: List[Bracket] = []
+    for g in grouped.values():
+        static = g["static"]
+        full_ranges = g["full"]
+        partial_ranges = g["partial"]
+
+        # Merge partial ranges first (keep most inclusive)
+        # NOTE: _merge_partial_ranges handles unbounded (lo=None, hi=None) by
+        # returning just the unbounded range, which covers everything
+        merged_partials = _merge_partial_ranges(partial_ranges)
+
+        # Check if any partial is completely unbounded - if so, it covers ALL
+        # (both other partials AND all full ranges in this group)
+        has_unbounded = any(r.lo is None and r.hi is None for r in merged_partials)
+        if has_unbounded:
+            # Unbounded covers everything - just emit the unbounded bracket
+            out_brackets.append(
+                Bracket(static_filter=static, timerange=TimeRange(None, None, False))
+            )
+            continue  # Skip all full and other partial for this static_filter
+
+        # Check if any partial covers all full ranges
+        # If so, we only need the partial (it fetches everything the fulls would)
+        remaining_fulls: List[TimeRange] = []
+        for fr in full_ranges:
+            covered = False
+            for pr in merged_partials:
+                if _partial_covers_full(pr, fr):
+                    covered = True
+                    break
+            if not covered:
+                remaining_fulls.append(fr)
+
+        # Merge remaining full ranges
+        for r in _merge_full_ranges(remaining_fulls):
+            out_brackets.append(Bracket(static_filter=static, timerange=r))
+
+        # Add merged partial ranges (these will be executed as single unchunked queries)
+        for r in merged_partials:
+            out_brackets.append(Bracket(static_filter=static, timerange=r))
+
+    if not out_brackets:
+        return False, "no-complete-time-range", [], (None, None)
+
+    return True, "", out_brackets, bounds
