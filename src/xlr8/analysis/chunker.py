@@ -52,6 +52,10 @@ With 10 workers, chunks are processed in parallel:
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Tuple
 
+__all__ = [
+    "chunk_time_range",
+]
+
 
 def chunk_time_range(
     start: datetime,
