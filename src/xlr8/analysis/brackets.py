@@ -84,6 +84,15 @@ from src.xlr8.analysis.inspector import (
     split_global_and,
 )
 
+__all__ = [
+    # Data structures
+    "Bracket",
+    "TimeRange",
+    # Main public function
+    "build_brackets_for_find",
+]
+
+
 # =============================================================================
 # OVERLAP DETECTION HELPERS
 # =============================================================================

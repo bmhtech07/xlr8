@@ -230,7 +230,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
-_all__ = [
+__all__ = [
     # Classification sets
     "ALWAYS_ALLOWED",
     "CONDITIONAL",
@@ -246,7 +246,6 @@ _all__ = [
     # Query analysis utilities
     "or_depth",
     "split_global_and",
-    "extract_time_bounds",
     "normalize_datetime",
     "normalize_query",
     "extract_time_bounds_recursive",
