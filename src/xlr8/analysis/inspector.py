@@ -1,8 +1,10 @@
 """
 MongoDB Query Validator for XLR8 Parallel Execution.
 
-XLR8 speeds up MongoDB queries by splitting them into smaller pieces that can be
-fetched in parallel. This module checks if a query is safe to split.
+XLR8 accelerates MongoDB queries by splitting them into smaller time-based
+chunks that can be fetched in parallel. This module validates if a query is
+safe to split. It does NOT perform the actual splitting—that's handled by
+brackets.py and chunker.py.
 
 ================================================================================
 HOW XLR8 PARALLELIZES QUERIES
@@ -10,14 +12,14 @@ HOW XLR8 PARALLELIZES QUERIES
 
 Simple example - fetch 1 year of sensor data:
 
-    # Original MongoDB query (slow - fetches 365 days serially)
+    # Original MongoDB query (fetches 365 days serially)
     db.sensors.find({
         "sensor_id": "temp_001",
         "timestamp": {"$gte": jan_1, "$lt": jan_1_next_year}
     })
 
-    # XLR8 automatically splits this into 26 parallel chunks (14 days each)
-    # and fetches them simultaneously using Rust workers.
+    # XLR8 automatically splits this into N parallel chunks
+    # fetched simultaneously using Rust workers
 
 The process has two phases:
 
@@ -33,45 +35,100 @@ PHASE 1: Split $or branches into independent brackets (brackets.py)
         Bracket 2: {"region": "EU", "timestamp": {...}}
 
 PHASE 2: Split each bracket's time range into smaller chunks (chunker.py)
-    Each bracket is split into 14-day chunks that are fetched in parallel.
-    Results are written to separate Parquet files.
-
-This module validates that queries meet safety requirements for both phases.
-It does NOT perform the actual splitting, only validation.
+    Each bracket is split into N chunks (user sets chunking granularity
+    timedelta(hours=16) etc.)  that are fetched in parallel.
+    Results are written to separate Parquet files, then merged.
 
 ================================================================================
 WHAT MAKES A QUERY SAFE TO PARALLELIZE?
 ================================================================================
 
-A query is safe if it meets ALL these requirements:
+A query is safe for parallel execution if it meets ALL these requirements:
 
-1. TIME BOUNDS - Query must have a specific time range
+1. TIME BOUNDS - Query must have complete time range
     SAFE:   {"timestamp": {"$gte": t1, "$lt": t2}}
-    UNSAFE: {"timestamp": {"$gte": t1}}  (no upper bound)
+    UNSAFE: {"timestamp": {"$gte": t1}}  (unbounded upper)
+    UNSAFE: {}  (no time reference at all)
 
-2. DOCUMENT-LOCAL OPERATORS - Each document can be evaluated independently
-    SAFE:   {"value": {"$gt": 100}}      (compare field to constant)
-    UNSAFE: {"$near": {"$geometry": ...}} (needs all docs to sort by distance)
+2. DOCUMENT-LOCAL OPERATORS - Each document evaluated independently
+    SAFE FOR PARALLEL:   {"value": {"$gt": 100}}      (compare field to constant)
+    SINGLE-WORKER ONLY:  {"$near": {"$geometry": ...}}
+    (needs all docs to sort by distance)
 
-3. NO TIME FIELD NEGATION - Cannot use $ne/$nin/$not on the time field
-    SAFE:   {"status": {"$nin": ["deleted", "draft"]}}
-    UNSAFE: {"timestamp": {"$nin": [specific_date]}}
+    Why not parallel? If we split by time, $near would return "nearest in each chunk"
+    not "nearest overall", giving wrong results. But works fine with single-worker.
 
-   Why? Negating time creates unbounded ranges. Saying "not this date" means
-   you need ALL other dates, which breaks the ability to split by time.
+3. NO TIME FIELD NEGATION - Cannot parallelize $ne/$nin/$not on time field
+    SAFE FOR PARALLEL:   {"status": {"$nin": ["deleted", "draft"]}}
+    SINGLE-WORKER ONLY:  {"timestamp": {"$nin": [specific_date]}}
 
-4. SIMPLE $or STRUCTURE - No nested $or operators
-    SAFE:   {"$or": [{"a": 1}, {"b": 2}]}
-    UNSAFE: {"$or": [{"$or": [{...}]}, {...}]}
+    Why not parallel? Negating time creates unbounded ranges. Saying "not this date"
+    means you need ALL other dates, which breaks the ability to split by time.
+    But works fine with single-worker execution.
+
+4. SIMPLE $or STRUCTURE - Nested $or too complex to parallelize
+    SAFE FOR PARALLEL:   {"$or": [{"a": 1}, {"b": 2}]}
+    SINGLE-WORKER ONLY:  {"$or": [{"$or": [{...}]}, {...}]}
+
+    Why not parallel? Nested $or creates complex overlaps that cannot be safely
+    split into independent brackets. But works fine with single-worker execution.
+
+5. NO $natural SORT - Insertion order incompatible with time chunking
+    SAFE FOR PARALLEL:   .sort([("timestamp", 1)])
+    SINGLE-WORKER ONLY:  .sort([("$natural", 1)])
+
+    Why not parallel? $natural returns documents in insertion order. When we
+    split by time, each chunk is sorted by insertion within that chunk, not globally.
+    But works fine with single-worker execution.
 
 ================================================================================
-OPERATOR REFERENCE
+THREE EXECUTION MODES
 ================================================================================
 
-ALWAYS_ALLOWED (23 operators)
-    These are safe for time chunking because they evaluate each document
-    independently without needing other documents.
+Every query is classified into one of three modes:
 
+┌─────────────────────────────────────────────────────────────────────────┐
+│ PARALLEL - Safe for parallel time-chunked execution                     │
+│   - Complete time bounds: {"timestamp": {"$gte": t1, "$lt": t2}}        │
+│   - Document-local operators only ($gt, $in, $exists, etc.)             │
+│   - No time field negation                                              │
+│   - Simple $or structure (depth <= 1)                                   │
+│   - No $natural sort                                                    │
+│   - All operators recognized and safe                                   │
+│                                                                         │
+│   -> Parallel execution with Rust workers and Parquet caching           │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│ SINGLE - Valid query, cannot parallelize safely                         │
+│   - Operators requiring full dataset ($text, $near, $expr, geospatial)  │
+│   - Nested $or (depth > 1) - overlap handling too complex               │
+│   - Time field negation ($timestamp: {$nin: [...]})                     │
+│   - $natural sort (requires insertion order)                            │
+│   - Unbounded/partial time ranges                                       │
+│   - No time field reference                                             │
+│   - Unknown operators (not yet classified)                              │
+│                                                                         │
+│   -> Single-worker execution                                            │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│ REJECT - Invalid query (MongoDB would also reject or return wrong data) │
+│   (X) Empty $or: {"$or": []} (invalid MongoDB syntax)                   │
+│   (X) Contradictory bounds: $gte: t2, $lt: t1 where t2 > t1             │
+│                                                                         │
+│   -> Error raised with clear explanation                                │
+│   -> User must fix the query                                            │
+└─────────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+OPERATOR CLASSIFICATION
+================================================================================
+
+ALWAYS_ALLOWED (23 operators) - Document-local evaluation
+    These are safe because they evaluate each document independently without
+    needing other documents.
+    9
     Comparison:  $eq, $ne, $gt, $gte, $lt, $lte, $in, $nin
     Element:     $exists, $type
     Array:       $all, $elemMatch, $size
@@ -80,28 +137,24 @@ ALWAYS_ALLOWED (23 operators)
     Logical:     $and
     Metadata:    $comment, $options
 
-    Note: When used in $or branches, brackets.py performs additional overlap
+    Edge case: When used in $or branches, brackets.py performs additional overlap
     checks to prevent duplicate results. For example:
         {"$or": [{"x": {"$in": [1,2,3]}}, {"x": {"$in": [3,4,5]}}]}
     The value 3 appears in both branches, so this needs special handling.
 
-CONDITIONAL (3 operators)
-    Safe only under specific conditions:
-
-    $or   - Allowed at depth 1 only (no nested $or)
-    $nor  - Allowed if it does NOT reference the time field
-    $not  - Allowed if NOT applied to the time field
+CONDITIONAL (3 operators) - Safe under specific conditions
+    $or   -> Allowed at depth 1 only (no nested $or)
+    $nor  -> Allowed if it does NOT reference the time field
+    $not  -> Allowed if NOT applied to the time field
 
     Examples:
-        allowed - {"$or": [{"region": "US"}, {"region": "EU"}]}
-        disallowed - {"$or": [{"$or": [{...}]}, {...}]}
+        SAFE:   {"$or": [{"region": "US"}, {"region": "EU"}]}
+        UNSAFE: {"$or": [{"$or": [{...}]}, {...}]}
 
-        allowed - {"$nor": [{"status": "deleted"}], "timestamp": {...}}
-        disallowed - {"$nor": [{"timestamp": {"$lt": t1}}]}
+        SAFE:   {"$nor": [{"status": "deleted"}], "timestamp": {...}}
+        UNSAFE: {"$nor": [{"timestamp": {"$lt": t1}}]}
 
-NEVER_ALLOWED (17 operators)
-    These cannot be parallelized safely:
-
+NEVER_ALLOWED (17 operators) - Require full dataset (triggers SINGLE mode)
     Geospatial:  $near, $nearSphere, $geoWithin, $geoIntersects, $geometry,
                  $box, $polygon, $center, $centerSphere, $maxDistance, $minDistance
     Text:        $text
@@ -109,35 +162,63 @@ NEVER_ALLOWED (17 operators)
     Atlas:       $search, $vectorSearch
     Legacy:      $uniqueDocs
 
-    Why? These operators either:
-    - Require the full dataset ($near sorts ALL docs by distance)
-    - Use corpus-wide statistics ($text uses IDF scores across all docs)
-    - Cannot be statically analyzed ($expr can contain arbitrary logic)
+    Why parallelization is disabled:
+    - $near/$nearSphere: Sort ALL docs by distance. If we split by time,
+      we'd get "nearest in chunk" not "nearest overall"
+    - $text: Uses corpus-wide IDF scores. Splitting changes term frequencies
+    - $expr/$where: Cannot statically analyze. May have arbitrary logic
+    - $search/$vectorSearch: Atlas-specific, require special infrastructure
+
+    These operators work fine with single-worker execution (no splitting).
+
+UNKNOWN operators -> Also triggers SINGLE mode (conservative/experimental)
+    If XLR8 encounters an operator not in the above lists, it conservatively
+    falls back to single-worker execution rather than risk incorrect results.
 
 ================================================================================
 API USAGE
 ================================================================================
 
-    from xlr8.analysis import is_chunkable_query
+    from xlr8.analysis import is_chunkable_query, ChunkabilityMode
 
-    # Check if query can be parallelized
+    # Basic usage
     query = {
         "sensor_id": "temp_001",
         "timestamp": {"$gte": jan_1, "$lt": feb_1}
     }
 
-    is_safe, reason, (start, end) = is_chunkable_query(query, "timestamp")
+    result = is_chunkable_query(query, "timestamp")
 
-    if is_safe:
-        print(f"Can parallelize from {start} to {end}")
-    else:
-        print(f"Cannot parallelize: {reason}")
+    if result.mode == ChunkabilityMode.PARALLEL:
+        print(f"Can parallelize from {result.bounds[0]} to {result.bounds[1]}")
+        # Proceed with parallel execution
+    elif result.mode == ChunkabilityMode.SINGLE:
+        print(f"Single-worker mode: {result.reason}")
+        # Execute with one worker (still faster than PyMongo)
+    else:  # REJECT
+        print(f"Cannot execute: {result.reason}")
+        # Raise error or fall back to PyMongo
 
-    # Common rejection reasons:
-    # - "no complete time range (invalid or contradictory bounds)"
-    # - "query contains negation operators ($ne/$nin) on time field"
-    # - "contains forbidden operator: $near"
-    # - "nested $or operators (depth > 1) not supported"
+    # Backwards-compatible boolean properties
+    result.is_chunkable    # True for PARALLEL only
+    result.is_executable   # True for PARALLEL or SINGLE
+
+    # Can also unpack as tuple (backwards compatibility)
+    mode, reason, (start, end) = is_chunkable_query(query, "timestamp")
+
+Common reasons by mode:
+    REJECT:  "$or with empty array matches no documents"
+             "invalid time range: lower bound >= upper bound
+             (contradictory constraints)"
+
+    SINGLE:  "operator '$text' requires full dataset (single-worker execution)"
+             "operator '$near' requires full dataset (single-worker execution)"
+             "nested $or operators (depth > 1) require single-worker execution"
+             "query contains negation operators ($ne/$nin) on time field"
+             "$natural sort requires insertion order (single-worker execution)"
+             "no time bounds found (requires single-worker execution)"
+             "unbounded $or branch (requires single-worker execution)"
+             "unknown operator '$futureOp' (experimental single-worker execution)"
 
 ================================================================================
 """
@@ -721,7 +802,7 @@ def extract_time_bounds(
         ... )
         (datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 2, 1, tzinfo=UTC))
 
-    Current implementation: $lte: t → $lt: t + 1 microsecond
+    Current implementation: $lte: t  $lt: t + 1 microsecond
     Pros: Clean internal model (half-open intervals [lo, hi))
     Cons: Tiny semantic change at microsecond precision
     Impact: Minimal - most MongoDB timestamps are millisecond precision anyway
@@ -858,7 +939,7 @@ def extract_time_bounds_recursive(
     def extract_from_time_field(value: Any) -> Tuple[Optional[Tuple], bool]:
         """Extract bounds from time field value."""
         if context == "NEGATED":
-            # Time field in negated context → can't use
+            # Time field in negated context  can't use
             return None, True
 
         if not isinstance(value, dict):
@@ -1139,7 +1220,7 @@ def is_chunkable_query(
 
     A query is chunkable if:
         1. Contains no forbidden operators (geospatial, text, $expr, etc.)
-        2. Conditional operators used safely ($or depth ≤1, no $not on time field)
+        2. Conditional operators used safely ($or depth <=1, no $not on time field)
         3. Has extractable time bounds (both lower and upper)
         4. No negations on time field ($nor/$not/$ne/$nin)
 
