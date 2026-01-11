@@ -226,8 +226,9 @@ Common reasons by mode:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime, timedelta, timezone
+from enum import Enum
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 _all__ = [
     # Classification sets
@@ -236,6 +237,8 @@ _all__ = [
     "NEVER_ALLOWED",
     # Validation
     "ValidationResult",
+    "ChunkabilityMode",
+    "ChunkabilityResult",
     "has_forbidden_ops",
     "check_conditional_operators",
     "validate_query_for_chunking",
@@ -334,7 +337,7 @@ CONDITIONAL: frozenset[str] = frozenset(
         #       {"sensor_id": "B", "timestamp": {"$gte": t1, "$lt": t2}}
         #   ]}
         #
-        # [X] REJECTED (depth 2 - nested $or):
+        # [X] Triggers SINGLE mode (depth 2 - nested $or):
         #   {"$or": [{"$or": [{...}, {...}]}, {...}]}
         #
         "$or",
@@ -346,7 +349,7 @@ CONDITIONAL: frozenset[str] = frozenset(
         #   {"$nor": [{"status": "deleted"}, {"status": "draft"}],
         #    "timestamp": {"$gte": t1, "$lt": t2}}
         #
-        # [X] REJECTED (negates time constraint):
+        # [X] Triggers SINGLE mode (negates time constraint):
         #   {"$nor": [{"timestamp": {"$lt": "2024-01-01"}}]}
         #
         "$nor",
@@ -356,7 +359,7 @@ CONDITIONAL: frozenset[str] = frozenset(
         # [OK] ALLOWED (negates value constraint):
         #   {"value": {"$not": {"$lt": 0}}}   - equivalent to value >= 0
         #
-        # [X] REJECTED (negates time constraint):
+        # [X] Triggers SINGLE mode (negates time constraint):
         #   {"timestamp": {"$not": {"$lt": "2024-01-15"}}}
         #
         "$not",
@@ -432,6 +435,71 @@ class ValidationResult:
 
     def __bool__(self) -> bool:
         return self.is_valid
+
+
+class ChunkabilityMode(Enum):
+    """Execution mode for MongoDB queries in XLR8.
+
+    XLR8 classifies queries into three execution modes based on safety
+    and parallelizability:
+
+    - PARALLEL: Query can be safely executed with parallel time-chunked workers.
+                Example: {"timestamp": {"$gte": t1, "$lt": t2}, "status": "active"}
+
+    - SINGLE: Query is valid but cannot be safely parallelized. Executes with
+              single worker but still uses Rust backend and Parquet caching.
+              Example: {"timestamp": {"$gte": t1}}, sort=[("$natural", 1)]
+
+    - REJECT: Invalid query syntax or contradictory constraints that MongoDB
+              would also reject or return no results for (e.g., empty $or array,
+              contradictory lo >= hi bounds). These queries should NOT be executed.
+              Example: {"$or": []}
+    """
+
+    PARALLEL = "parallel"  # Safe for parallel time-chunked execution
+    SINGLE = "single"  # Valid query, single-worker fallback
+    REJECT = "reject"  # Invalid syntax or contradictory constraints
+
+
+class ChunkabilityResult(NamedTuple):
+    """Result of query chunkability analysis.
+
+    Provides structured result with execution mode, reason, and time bounds.
+
+    Attributes:
+        mode: Execution mode (PARALLEL/SINGLE/REJECT)
+        reason: Empty string if PARALLEL, explanation otherwise
+        bounds: Time bounds tuple (lo, hi) or (None, None)
+
+    Examples:
+        >>> result = ChunkabilityResult(
+        ...     mode=ChunkabilityMode.PARALLEL,
+        ...     reason="",
+        ...     bounds=(datetime(2024,1,1), datetime(2024,7,1))
+        ... )
+        >>> result.mode == ChunkabilityMode.PARALLEL
+        True
+
+        >>> result = ChunkabilityResult(
+        ...     mode=ChunkabilityMode.SINGLE,
+        ...     reason="$natural sort requires insertion order",
+        ...     bounds=(datetime(2024,1,1), datetime(2024,7,1))
+        ... )
+        >>> result.mode == ChunkabilityMode.SINGLE
+        True
+
+        >>> result = ChunkabilityResult(
+        ...     mode=ChunkabilityMode.REJECT,
+        ...     reason="empty $or array (invalid MongoDB syntax)",
+        ...     bounds=(None, None)
+        ... )
+        >>> result.mode == ChunkabilityMode.REJECT
+        True
+    """
+
+    mode: ChunkabilityMode
+    reason: str
+    bounds: Tuple[Optional[datetime], Optional[datetime]]
 
 
 # =============================================================================
@@ -515,7 +583,7 @@ def check_conditional_operators(
 
     Args:
         query: MongoDB query dict
-        time_field: Name of time field (e.g., "recordedAt")
+        time_field: Name of time field (e.g., "timestamp")
 
     Returns:
         ValidationResult with is_valid and reason
@@ -609,30 +677,30 @@ def validate_query_for_chunking(
         >>> validate_query_for_chunking({
         ...     "account_id": ObjectId("..."),
         ...     "region_id": {"$in": [ObjectId("..."), ...]},
-        ...     "recordedAt": {"$gte": t1, "$lt": t2}
-        ... }, "recordedAt")
+        ...     "timestamp": {"$gte": t1, "$lt": t2}
+        ... }, "timestamp")
         (True, '')
 
         # $or with per-branch time ranges (typical XLR8 pattern)
         >>> validate_query_for_chunking({
         ...     "$or": [
-        ...         {"sensor": "A", "recordedAt": {"$gte": t1, "$lt": t2}},
-        ...         {"sensor": "B", "recordedAt": {"$gte": t3, "$lt": t4}}
+        ...         {"sensor": "A", "timestamp": {"$gte": t1, "$lt": t2}},
+        ...         {"sensor": "B", "timestamp": {"$gte": t3, "$lt": t4}}
         ...     ],
         ...     "account_id": ObjectId("...")
-        ... }, "recordedAt")
+        ... }, "timestamp")
         (True, '')
 
         # Rejected: contains $expr
         >>> validate_query_for_chunking({
         ...     "$expr": {"$gt": ["$endTime", "$startTime"]}
-        ... }, "recordedAt")
+        ... }, "timestamp")
         (False, 'contains forbidden operator: $expr')
 
         # Rejected: geospatial operator
         >>> validate_query_for_chunking({
         ...     "location": {"$near": {"$geometry": {...}}}
-        ... }, "recordedAt")
+        ... }, "timestamp")
         (False, 'contains forbidden operator: $near')
     """
     # Check for forbidden operators
@@ -700,13 +768,13 @@ def split_global_and(
         >>> split_global_and({
         ...     "$or": [{"sensor": "A"}, {"sensor": "B"}],
         ...     "account_id": "123",
-        ...     "recordedAt": {"$gte": t1, "$lt": t2}
+        ...     "timestamp": {"$gte": t1, "$lt": t2}
         ... })
-        ({'account_id': '123', 'recordedAt': {...}}, [{'sensor': 'A'}, {'sensor': 'B'}])
+        ({'account_id': '123', 'timestamp': {...}}, [{'sensor': 'A'}, {'sensor': 'B'}])
 
         # The global conditions apply to ALL branches:
-        # Bracket 1: {"account_id": "123", "recordedAt": {...}, "sensor": "A"}
-        # Bracket 2: {"account_id": "123", "recordedAt": {...}, "sensor": "B"}
+        # Bracket 1: {"account_id": "123", "timestamp": {...}, "sensor": "A"}
+        # Bracket 2: {"account_id": "123", "timestamp": {...}, "sensor": "B"}
     """
     q = dict(query)
 
@@ -763,12 +831,12 @@ def normalize_datetime(dt: Any) -> datetime | None:
     Returns None if parsing fails.
     """
     if isinstance(dt, datetime):
-        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
     if isinstance(dt, str):
         try:
             parsed = datetime.fromisoformat(dt.replace("Z", "+00:00"))
-            return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
         except (ValueError, AttributeError):
             return None
     return None
@@ -796,9 +864,9 @@ def extract_time_bounds(
 
     Examples:
         >>> extract_time_bounds(
-        ...     {"recordedAt": {"$gte": datetime(2024, 1, 1),
+        ...     {"timestamp": {"$gte": datetime(2024, 1, 1),
         ...     "$lt": datetime(2024, 2, 1)}},
-        ...     "recordedAt"
+        ...     "timestamp"
         ... )
         (datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 2, 1, tzinfo=UTC))
 
@@ -1236,17 +1304,17 @@ def is_chunkable_query(
         >>> is_chunkable_query({
         ...     "account_id": ObjectId("..."),
         ...     "device_id": {"$in": [ObjectId("..."), ...]},
-        ...     "recordedAt": {"$gte": t1, "$lt": t2}
-        ... }, "recordedAt")
+        ...     "timestamp": {"$gte": t1, "$lt": t2}
+        ... }, "timestamp")
         (True, '', (t1, t2))
 
         # $or query - chunkable
         >>> is_chunkable_query({
         ...     "$or": [
-        ...         {"sensor": "A", "recordedAt": {"$gte": t1, "$lt": t2}},
-        ...         {"sensor": "B", "recordedAt": {"$gte": t3, "$lt": t4}}
+        ...         {"sensor": "A", "timestamp": {"$gte": t1, "$lt": t2}},
+        ...         {"sensor": "B", "timestamp": {"$gte": t3, "$lt": t4}}
         ...     ]
-        ... }, "recordedAt")
+        ... }, "timestamp")
         (True, '', (min(t1, t3), max(t2, t4)))
 
         # Nested $and with $or - NOW chunkable!
@@ -1254,11 +1322,11 @@ def is_chunkable_query(
         ...     "$and": [
         ...         {"account_id": "123"},
         ...         {"$and": [
-        ...             {"recordedAt": {"$gte": t1, "$lt": t2}},
+        ...             {"timestamp": {"$gte": t1, "$lt": t2}},
         ...             {"$or": [{"region": "US"}, {"region": "EU"}]}
         ...         ]}
         ...     ]
-        ... }, "recordedAt")
+        ... }, "timestamp")
         (True, '', (t1, t2))
 
         # Multiple $or - NOW chunkable (single bracket, time-chunked)!
@@ -1267,8 +1335,8 @@ def is_chunkable_query(
         ...         {"$or": [{"region": "US"}, {"region": "EU"}]},
         ...         {"$or": [{"sensor": "A"}, {"sensor": "B"}]}
         ...     ],
-        ...     "recordedAt": {"$gte": t1, "$lt": t2}
-        ... }, "recordedAt")
+        ...     "timestamp": {"$gte": t1, "$lt": t2}
+        ... }, "timestamp")
         (True, '', (t1, t2))
     """
     # Normalize query structure
