@@ -1217,3 +1217,34 @@ class ParquetReader:
                 logger.error(f"Error in globally sorted streaming: {e}")
                 return
             raise
+
+    def get_statistics(self) -> Dict[str, Any]:
+        """
+        Get statistics about cached data.
+
+        Returns:
+            Dict with file count, total rows, size, schema info
+        """
+        total_rows = 0
+        total_size = 0
+        schema = None
+
+        for parquet_file in self.parquet_files:
+            # File size
+            total_size += parquet_file.stat().st_size
+
+            # Read metadata
+            parquet_meta = pq.read_metadata(parquet_file)
+            total_rows += parquet_meta.num_rows
+
+            # Get schema from first file
+            if schema is None:
+                schema = parquet_meta.schema.to_arrow_schema()
+
+        return {
+            "file_count": len(self.parquet_files),
+            "total_rows": total_rows,
+            "total_size_mb": round(total_size / (1024 * 1024), 2),
+            "schema_fields": [field.name for field in schema] if schema else [],
+            "cache_dir": str(self.cache_dir),
+        }
