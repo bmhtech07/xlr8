@@ -92,8 +92,9 @@ OUTPUT: DataFrame ( or Polars to stream pyarrow.Table )
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterator, Literal, Optional, Union
+from typing import Any, Dict, Generator, Iterator, List, Literal, Optional, Tuple, Union
 
+import duckdb
 import pandas as pd
 import polars as pl
 import pyarrow as pa
@@ -661,3 +662,558 @@ class ParquetReader:
 
         else:
             raise ValueError(f"Unknown engine: {engine}. Use 'pandas' or 'polars'")
+
+    def iter_dataframe_batches(
+        self,
+        batch_size: int = 10000,
+        schema: Optional[Any] = None,
+        time_field: Optional[str] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        coerce: Literal["raise", "error"] = "raise",
+    ) -> Generator[pd.DataFrame, None, None]:
+        """
+        Yield DataFrames in batches without loading all data into memory.
+
+        This is memory-efficient: only batch_size rows are in memory at a time.
+        Uses PyArrow's batch iteration for efficient streaming.
+
+        Use this when NO sorting is needed. For sorted batches, use
+        iter_globally_sorted_batches().
+
+        Args:
+            batch_size: Number of rows per batch (default: 10,000)
+            schema: Schema for struct decoding and ObjectId reconstruction
+            time_field: Name of time field for date filtering
+            start_date: Filter data from this date (inclusive, tz-aware)
+            end_date: Filter data until this date (exclusive, tz-aware)
+            coerce: Error handling mode ("raise" or "error")
+
+        Yields:
+            pd.DataFrame: Batches of processed rows
+
+        Example:
+            >>> for batch_df in reader.iter_dataframe_batches(batch_size=5000):
+            ...     process(batch_df)
+        """
+        import pyarrow.parquet as pq
+
+        batch_count = 0
+        total_rows = 0
+
+        for parquet_file in self.parquet_files:
+            try:
+                # Open parquet file for batch iteration
+                parquet_file_obj = pq.ParquetFile(parquet_file)
+
+                for batch in parquet_file_obj.iter_batches(batch_size=batch_size):
+                    # Convert Arrow batch to pandas
+                    batch_df = batch.to_pandas()
+
+                    # Apply date filter if specified
+                    # (in case predicate pushdown not supported)
+                    if time_field and (start_date or end_date):
+                        if time_field in batch_df.columns:
+                            if start_date:
+                                batch_df = batch_df[batch_df[time_field] >= start_date]
+                            if end_date:
+                                batch_df = batch_df[batch_df[time_field] < end_date]
+
+                    if len(batch_df) == 0:
+                        continue
+
+                    # Process the batch (decode structs, flatten, reconstruct ObjectIds)
+                    processed_df = self._process_dataframe(
+                        batch_df, "pandas", schema, coerce
+                    )
+
+                    batch_count += 1
+                    total_rows += len(processed_df)
+
+                    yield processed_df
+
+            except Exception as e:
+                if coerce == "error":
+                    logger.error(f"Error reading batch from {parquet_file}: {e}")
+                    continue
+                raise
+
+        logger.debug(f"Yielded {batch_count} batches, {total_rows} total rows")
+
+    def get_globally_sorted_dataframe(
+        self,
+        sort_spec: List[Tuple[str, int]],
+        schema: Optional[Any] = None,
+        time_field: Optional[str] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        coerce: Literal["raise", "error"] = "raise",
+        memory_limit_mb: Optional[int] = None,
+        threads: Optional[int] = None,
+    ) -> pd.DataFrame:
+        """
+        Return entire globally sorted DataFrame using DuckDB K-way merge.
+
+        More efficient than iter_globally_sorted_batches() when you want
+        the full result, as it avoids batch iteration overhead and just
+        fetches all rows at once.
+        for to_dataframe_batches() where streaming is required.
+
+        Args:
+            sort_spec: Sort specification as [(field, direction), ...]
+            schema: Schema for ObjectId reconstruction and advanced sorting
+            time_field: Field for date filtering
+            start_date: Filter data from this date (inclusive, tz-aware)
+            end_date: Filter data until this date (exclusive, tz-aware)
+            coerce: Error handling mode
+            memory_limit_mb: DuckDB memory limit
+            threads: DuckDB thread count
+
+        Returns:
+            pd.DataFrame: Complete sorted DataFrame
+        """
+        if not self.parquet_files:
+            return pd.DataFrame()
+
+        # Expand parent fields to children in schema definition order
+        sort_spec = self._expand_parent_sort_fields(sort_spec, schema)
+
+        # Get list of parquet files
+        file_paths = [str(f) for f in self.parquet_files]
+
+        logger.debug(
+            f"DuckDB K-way merge (full): {len(file_paths)} files, sort_spec={sort_spec}"
+        )
+
+        try:
+            # Create DuckDB connection
+            conn = duckdb.connect(":memory:")
+
+            # Configure DuckDB to use allocated resources
+            if memory_limit_mb:
+                conn.execute(f"SET memory_limit = '{memory_limit_mb}MB'")
+                logger.info(f"DuckDB memory_limit set to {memory_limit_mb} MB")
+
+            if threads:
+                conn.execute(f"SET threads = {threads}")
+                logger.info(f"DuckDB threads set to {threads}")
+
+            # Build ORDER BY with MongoDB type ordering
+            # (same logic as iter_globally_sorted_batches)
+            order_clauses = []
+            for field_name, direction in sort_spec:
+                dir_sql = "ASC" if direction == 1 else "DESC"
+                if schema and schema.has_field(field_name):
+                    field_type = schema.get_field_type(field_name)
+                else:
+                    field_type = None
+                is_any = self._is_any_type(field_type) if field_type else True
+
+                if is_any:
+                    # Complete MongoDB type ordering for Any() fields
+                    type_clause = f"""CASE
+                        WHEN "{field_name}" IS NULL OR "{field_name}".null_value IS TRUE
+                            THEN 0
+                        WHEN "{field_name}".float_value IS NOT NULL
+                            OR "{field_name}".int32_value IS NOT NULL
+                            OR "{field_name}".int64_value IS NOT NULL
+                            OR "{field_name}".decimal128_value IS NOT NULL
+                            THEN 1
+                        WHEN "{field_name}".string_value IS NOT NULL THEN 2
+                        WHEN "{field_name}".document_value IS NOT NULL THEN 3
+                        WHEN "{field_name}".array_value IS NOT NULL THEN 4
+                        WHEN "{field_name}".binary_value IS NOT NULL THEN 5
+                        WHEN "{field_name}".objectid_value IS NOT NULL THEN 6
+                        WHEN "{field_name}".bool_value IS NOT NULL THEN 7
+                        WHEN "{field_name}".datetime_value IS NOT NULL THEN 8
+                        WHEN "{field_name}".regex_value IS NOT NULL THEN 9
+                        ELSE 10
+                    END {dir_sql}"""
+
+                    # Value comparisons for each type
+                    num_clause = (
+                        f'COALESCE("{field_name}".float_value, '
+                        f'CAST("{field_name}".int32_value AS DOUBLE), '
+                        f'CAST("{field_name}".int64_value AS DOUBLE)) {dir_sql}'
+                    )
+                    str_clause = f'"{field_name}".string_value {dir_sql}'
+                    doc_clause = f'"{field_name}".document_value {dir_sql}'
+                    arr_clause = f'"{field_name}".array_value {dir_sql}'
+                    bin_clause = f'"{field_name}".binary_value {dir_sql}'
+                    oid_clause = f'"{field_name}".objectid_value {dir_sql}'
+                    bool_clause = f'"{field_name}".bool_value {dir_sql}'
+                    date_clause = f'"{field_name}".datetime_value {dir_sql}'
+                    regex_clause = f'"{field_name}".regex_value {dir_sql}'
+
+                    order_clauses.extend(
+                        [
+                            type_clause,
+                            num_clause,
+                            str_clause,
+                            doc_clause,
+                            arr_clause,
+                            bin_clause,
+                            oid_clause,
+                            bool_clause,
+                            date_clause,
+                            regex_clause,
+                        ]
+                    )
+                else:
+                    # Simple field - use direct comparison
+                    order_clauses.append(f'"{field_name}" {dir_sql}')
+
+            order_by = ", ".join(order_clauses)
+            files = ", ".join([f"'{f}'" for f in file_paths])
+            query = f"SELECT * FROM read_parquet([{files}]) ORDER BY {order_by}"
+
+            print(f"[DuckDB] K-way merge (full): {len(file_paths)} files")
+
+            # Fetch entire result at once using df()
+            df = conn.execute(query).df()
+
+            # Ensure time field is UTC
+            if time_field and time_field in df.columns:
+                if pd.api.types.is_datetime64_any_dtype(df[time_field]):
+                    if df[time_field].dt.tz is not None:
+                        df[time_field] = df[time_field].dt.tz_convert("UTC")
+                    else:
+                        df[time_field] = df[time_field].dt.tz_localize("UTC")
+
+            # Apply date filtering if needed
+            if time_field and (start_date or end_date):
+                if start_date:
+                    df = df[df[time_field] >= start_date]
+                if end_date:
+                    df = df[df[time_field] < end_date]
+
+            # Process the DataFrame (decode structs, reconstruct ObjectIds)
+            df = self._process_dataframe(df, "pandas", schema, coerce)
+
+            conn.close()
+            print(f"[DuckDB] K-way merge complete: {len(df):,} rows")
+            logger.debug(f"DuckDB K-way merge complete: {len(df):,} rows")
+
+            return df
+
+        except Exception as e:
+            logger.error(f"DuckDB K-way merge failed: {e}")
+            raise
+
+    def _expand_parent_sort_fields(
+        self, sort_spec: List[Tuple[str, int]], schema: Optional[Any]
+    ) -> List[Tuple[str, int]]:
+        """
+        Expand parent field sorts to their child fields in schema definition order.
+
+        When user sorts by a parent field like "metadata" but the schema has
+        flattened fields like "metadata.vessel_id", expand to all children.
+
+        Args:
+            sort_spec: Original [(field, direction), ...]
+            schema: XLR8 schema with field definitions
+
+        Returns:
+            Expanded sort spec with parent fields replaced by children
+
+        Raises:
+            ValueError: If field not found and no children exist
+        """
+        if schema is None:
+            return sort_spec
+
+        expanded = []
+        # Schema.fields preserves insertion order (Python 3.7+)
+        all_fields = list(schema.fields.keys())
+
+        for field_name, direction in sort_spec:
+            if schema.has_field(field_name):
+                # Field exists directly in schema
+                expanded.append((field_name, direction))
+            else:
+                # Look for child fields with this prefix (in schema order)
+                prefix = f"{field_name}."
+                children = [f for f in all_fields if f.startswith(prefix)]
+
+                if children:
+                    logger.info(
+                        f"Sort field '{field_name}' expanded to children "
+                        f"(schema order): {children}"
+                    )
+                    for child in children:
+                        expanded.append((child, direction))
+                else:
+                    raise ValueError(
+                        f"Sort field '{field_name}' not found in schema "
+                        f"and has no child fields. "
+                        f"Available fields: {sorted(all_fields)[:10]}"
+                        + ("..." if len(all_fields) > 10 else "")
+                    )
+
+        return expanded
+
+    def iter_globally_sorted_batches(
+        self,
+        sort_field: Optional[str] = None,
+        ascending: bool = True,
+        batch_size: int = DEFAULT_BATCH_SIZE,
+        schema: Optional[Any] = None,
+        time_field: Optional[str] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        coerce: Literal["raise", "error"] = "raise",
+        sort_spec: Optional[List[Tuple[str, int]]] = None,
+        # DuckDB configuration
+        memory_limit_mb: Optional[int] = None,
+        threads: Optional[int] = None,
+    ) -> Generator[pd.DataFrame, None, None]:
+        """
+        Yield globally sorted batches using DuckDB K-way merge.
+
+        This method reads all Parquet files in the cache directory and
+        yields batches in globally sorted order. Uses Rust's K-way merge
+        with MongoDB BSON comparison for 100% compatibility.
+
+        Supports advanced sorting:
+        - Parent fields (e.g., "metadata" expands to all child fields)
+        - Types.Any() with full MongoDB BSON type ordering (Objects, Arrays, Binary)
+
+        RAM Usage:
+            O(K × batch_size) where K = number of files.
+            Already handled by flush_ram_limit_mb.
+
+        Args:
+            sort_field: Field to sort by (use sort_spec for multi-field sorting).
+            ascending: Sort direction (use sort_spec for mixed directions).
+            batch_size: Number of rows per yielded DataFrame (default: 10,000)
+            schema: Schema for ObjectId reconstruction and advanced sorting
+            time_field: Field for date filtering (usually same as sort_field)
+            start_date: Filter data from this date (inclusive, tz-aware)
+            end_date: Filter data until this date (exclusive, tz-aware)
+            coerce: Error handling mode ("raise" or "error")
+            sort_spec: Sort specification as [(field, direction), ...] where
+                      direction is 1 (ASC) or -1 (DESC). Preferred over sort_field.
+
+        Yields:
+            pd.DataFrame: Batches in globally sorted order
+
+        Example:
+            >>> reader = ParquetReader(".cache/abc123def")
+            >>> # Simple sort
+            >>> for batch in reader.iter_globally_sorted_batches(
+            ...     sort_spec=[("timestamp", 1)],
+            ...     schema=schema,
+            ...     batch_size=10_000
+            ... ):
+            ...     process(batch)
+            >>>
+            >>> # Advanced: parent field + Any type
+            >>> for batch in reader.iter_globally_sorted_batches(
+            ...     sort_spec=[("metadata", -1), ("value", 1)],
+            ...     schema=schema,
+            ... ):
+            ...     process(batch)
+        """
+
+        if not self.parquet_files:
+            return
+
+        # Handle backwards compatibility
+        if sort_spec is None and sort_field is not None:
+            direction = 1 if ascending else -1
+            sort_spec = [(sort_field, direction)]
+
+        if sort_spec is None:
+            raise ValueError("sort_spec or sort_field is required")
+
+        # Expand parent fields to children in schema definition order
+        sort_spec = self._expand_parent_sort_fields(sort_spec, schema)
+
+        # Get list of parquet files
+        file_paths = [str(f) for f in self.parquet_files]
+
+        logger.debug(
+            f"DuckDB K-way merge: {len(file_paths)} files, sort_spec={sort_spec}"
+        )
+
+        try:
+            # Create DuckDB connection
+            conn = duckdb.connect(":memory:")
+
+            # Configure DuckDB to use allocated resources
+            if memory_limit_mb:
+                conn.execute(f"SET memory_limit = '{memory_limit_mb}MB'")
+                logger.info(f"DuckDB memory_limit set to {memory_limit_mb} MB")
+
+            if threads:
+                conn.execute(f"SET threads = {threads}")
+                logger.info(f"DuckDB threads set to {threads}")
+
+            # Query DuckDB settings to verify
+            memory_result = conn.execute(
+                "SELECT current_setting('memory_limit')"
+            ).fetchone()
+            actual_memory = memory_result[0] if memory_result else "unknown"
+            threads_result = conn.execute(
+                "SELECT current_setting('threads')"
+            ).fetchone()
+            actual_threads = threads_result[0] if threads_result else "unknown"
+            logger.debug(
+                f"DuckDB configured: memory={actual_memory}, threads={actual_threads}"
+            )
+
+            # Build ORDER BY with MongoDB type ordering
+            order_clauses = []
+            for field_name, direction in sort_spec:
+                dir_sql = "ASC" if direction == 1 else "DESC"
+                # Check if field exists in schema before getting type
+                if schema and schema.has_field(field_name):
+                    field_type = schema.get_field_type(field_name)
+                else:
+                    field_type = None
+                is_any = self._is_any_type(field_type) if field_type else True
+
+                if is_any:
+                    # Complete MongoDB type ordering for Any() fields:
+                    # Reference: https://www.mongodb.com/docs/manual/reference/bson-type-comparison-order/
+                    # 1. MinKey (internal)
+                    # 2. Null
+                    # 3. Numbers (int, long, double, decimal)
+                    # 4. Symbol, String
+                    # 5. Object
+                    # 6. Array
+                    # 7. BinData
+                    # 8. ObjectId
+                    # 9. Boolean
+                    # 10. Date
+                    # 11. Timestamp
+                    # 12. Regular Expression
+                    # 13. MaxKey (internal)
+
+                    # Type priority clause
+                    type_clause = f"""CASE
+                        WHEN "{field_name}" IS NULL OR "{field_name}".null_value IS TRUE
+                            THEN 0
+                        WHEN "{field_name}".float_value IS NOT NULL
+                            OR "{field_name}".int32_value IS NOT NULL
+                            OR "{field_name}".int64_value IS NOT NULL
+                            OR "{field_name}".decimal128_value IS NOT NULL
+                            THEN 1
+                        WHEN "{field_name}".string_value IS NOT NULL THEN 2
+                        WHEN "{field_name}".document_value IS NOT NULL THEN 3
+                        WHEN "{field_name}".array_value IS NOT NULL THEN 4
+                        WHEN "{field_name}".binary_value IS NOT NULL THEN 5
+                        WHEN "{field_name}".objectid_value IS NOT NULL THEN 6
+                        WHEN "{field_name}".bool_value IS NOT NULL THEN 7
+                        WHEN "{field_name}".datetime_value IS NOT NULL THEN 8
+                        WHEN "{field_name}".regex_value IS NOT NULL THEN 9
+                        ELSE 10
+                    END {dir_sql}"""
+
+                    # Value comparisons for each type
+                    num_clause = (
+                        f'COALESCE("{field_name}".float_value, '
+                        f'CAST("{field_name}".int32_value AS DOUBLE), '
+                        f'CAST("{field_name}".int64_value AS DOUBLE)) {dir_sql}'
+                    )
+                    str_clause = f'"{field_name}".string_value {dir_sql}'
+                    # JSON strings compare lexicographically
+                    doc_clause = f'"{field_name}".document_value {dir_sql}'
+                    # JSON arrays compare lexicographically
+                    arr_clause = f'"{field_name}".array_value {dir_sql}'
+                    bin_clause = f'"{field_name}".binary_value {dir_sql}'
+                    oid_clause = f'"{field_name}".objectid_value {dir_sql}'
+                    bool_clause = f'"{field_name}".bool_value {dir_sql}'
+                    date_clause = f'"{field_name}".datetime_value {dir_sql}'
+                    regex_clause = f'"{field_name}".regex_value {dir_sql}'
+
+                    order_clauses.extend(
+                        [
+                            type_clause,
+                            num_clause,
+                            str_clause,
+                            doc_clause,
+                            arr_clause,
+                            bin_clause,
+                            oid_clause,
+                            bool_clause,
+                            date_clause,
+                            regex_clause,
+                        ]
+                    )
+                else:
+                    # Simple field - use direct comparison
+                    order_clauses.append(f'"{field_name}" {dir_sql}')
+
+            order_by = ", ".join(order_clauses)
+            files = ", ".join([f"'{f}'" for f in file_paths])
+            query = f"SELECT * FROM read_parquet([{files}]) ORDER BY {order_by}"
+
+            result = conn.execute(query)
+
+            # Use fetchmany() cursor API - this ACTUALLY streams incrementally
+            # without loading all data into memory (unlike fetch_df_chunk)
+            # NOTE: DuckDB's k-way merge uses internal buffering
+            # separate from batch_size.
+            # batch_size only controls how much we pull at once,
+            # not DuckDB's merge buffer.
+            batch_count = 0
+            total_rows = 0
+            column_names = [desc[0] for desc in result.description]
+
+            print(
+                f"[DuckDB] K-way merge started: {len(file_paths)} files, "
+                f"batch_size={batch_size:,}"
+            )
+
+            while True:
+                # Fetch batch as list of tuples
+                rows = result.fetchmany(batch_size)
+                if not rows:
+                    break
+
+                batch_count += 1
+                total_rows += len(rows)
+
+                # Convert to DataFrame
+                batch_df = pd.DataFrame(rows, columns=column_names)
+                logger.debug(
+                    f"Streamed batch {batch_count}: {len(batch_df)} rows "
+                    f"from DuckDB K-way merge"
+                )
+
+                # Ensure time field is UTC (DuckDB might return naive)
+                if time_field and time_field in batch_df.columns:
+                    if pd.api.types.is_datetime64_any_dtype(batch_df[time_field]):
+                        if batch_df[time_field].dt.tz is not None:
+                            batch_df[time_field] = batch_df[time_field].dt.tz_convert(
+                                "UTC"
+                            )
+                        else:
+                            batch_df[time_field] = batch_df[time_field].dt.tz_localize(
+                                "UTC"
+                            )
+
+                # Apply date filtering if needed
+                if time_field and (start_date or end_date):
+                    if start_date:
+                        batch_df = batch_df[batch_df[time_field] >= start_date]
+                    if end_date:
+                        batch_df = batch_df[batch_df[time_field] < end_date]
+                    if len(batch_df) == 0:
+                        continue
+
+                # Process the batch (decode structs, reconstruct ObjectIds)
+                processed_df = self._process_dataframe(
+                    batch_df, "pandas", schema, coerce
+                )
+                yield processed_df
+
+            conn.close()
+            logger.debug("DuckDB K-way merge complete")
+
+        except Exception as e:
+            if coerce == "error":
+                logger.error(f"Error in globally sorted streaming: {e}")
+                return
+            raise
