@@ -174,7 +174,7 @@ This test file covers ALL code paths:
    Full bounds, partial bounds, unbounded queries
 
 7. REAL-WORLD SCENARIO TESTS
-   Vessel data with $nin, multi-region queries
+   device data with $nin, multi-region queries
 
 Each test validates against actual brackets.py implementation.
 """
@@ -578,12 +578,12 @@ class TestMergeOptimizationSuccess:
         query = {
             "$or": [
                 {
-                    "vessel_id": "X",
+                    "device_id": "X",
                     "config": {"$nin": ["a"]},
                     time_field: {"$gte": t_mid, "$lt": t_end},
                 },
                 {
-                    "vessel_id": "X",
+                    "device_id": "X",
                     "config": {"$nin": ["a"]},
                     time_field: {"$gte": t_start, "$lt": t_end},
                 },
@@ -922,22 +922,22 @@ class TestTimeRangeHandling:
 class TestRealWorldScenarios:
     """Test complex queries mimicking actual production usage."""
 
-    def test_vessel_data_with_nin_merge(self, time_field):
-        """The original bug case: vessel data with $nin and overlapping times.
+    def test_device_data_with_nin_merge(self, time_field):
+        """The original bug case: device data with $nin and overlapping times.
 
         Query pattern:
             $or: [
-                {vessel_id: X, logConfig_id: {$nin: [...]},
+                {device_id: X, sensor_id: {$nin: [...]},
                  recordedAt: {start+1day, now-1day}},
-                {vessel_id: X, logConfig_id: {$nin: [...]},
+                {device_id: X, sensor_id: {$nin: [...]},
                  recordedAt: {start, now}},
             ]
 
         Expected: MERGE into single bracket because:
-        - Same static filters (identical vessel_id and $nin)
+        - Same static filters (identical device_id and $nin)
         - Overlapping time ranges (second contains first)
         """
-        vessel_id = ObjectId()
+        device_id = ObjectId()
         excluded_configs = [ObjectId() for _ in range(10)]
 
         t_start = datetime(2024, 10, 21, tzinfo=timezone.utc)
@@ -948,13 +948,13 @@ class TestRealWorldScenarios:
         query = {
             "$or": [
                 {
-                    "metadata.vessel_id": vessel_id,
-                    "metadata.logConfig_id": {"$nin": excluded_configs},
+                    "metadata.device_id": device_id,
+                    "metadata.sensor_id": {"$nin": excluded_configs},
                     time_field: {"$gte": t_start_plus_1, "$lt": t_end_minus_1},
                 },
                 {
-                    "metadata.vessel_id": vessel_id,
-                    "metadata.logConfig_id": {"$nin": excluded_configs},
+                    "metadata.device_id": device_id,
+                    "metadata.sensor_id": {"$nin": excluded_configs},
                     time_field: {"$gte": t_start, "$lt": t_end},
                 },
             ]

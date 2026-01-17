@@ -66,7 +66,7 @@ def _expand_parent_fields(
     Expand parent fields to their children in schema definition order.
 
     When user specifies a parent field like "metadata" but the schema has
-    flattened fields like "metadata.vessel_id", expand to all children.
+    flattened fields like "metadata.device_id", expand to all children.
 
     Args:
         fields: Original field list

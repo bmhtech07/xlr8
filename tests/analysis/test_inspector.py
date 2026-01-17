@@ -694,15 +694,15 @@ class TestComplexQueries:
     Test realistic, complex query patterns from actual XLR8 usage.
     """
 
-    def test_xlr8_typical_vessel_query(self, time_field, t1, t2):
-        """Real XLR8 pattern: Vessel with multiple log configs."""
+    def test_xlr8_typical_device_query(self, time_field, t1, t2):
+        """Real XLR8 pattern: device with multiple log configs."""
         query = {
             "$or": [
-                {"metadata.logConfig_id": ObjectId("64a1234567890123456789ab")},
-                {"metadata.logConfig_id": ObjectId("64b1234567890123456789ab")},
-                {"metadata.logConfig_id": ObjectId("64c1234567890123456789ab")},
+                {"metadata.sensor_id": ObjectId("64a1234567890123456789ab")},
+                {"metadata.sensor_id": ObjectId("64b1234567890123456789ab")},
+                {"metadata.sensor_id": ObjectId("64c1234567890123456789ab")},
             ],
-            "metadata.vessel_id": ObjectId("123456789012345678901234"),
+            "metadata.device_id": ObjectId("123456789012345678901234"),
             time_field: {"$gte": t1, "$lt": t2},
         }
         is_chunkable, reason, bounds = is_chunkable_query(query, time_field)
