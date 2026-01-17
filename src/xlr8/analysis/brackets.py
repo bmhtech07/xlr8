@@ -529,7 +529,7 @@ def _check_or_branch_safety(
         if bounds is None:
             lo, hi = None, None
         else:
-            lo, hi = bounds
+            lo, hi, hi_inclusive, lo_inclusive = bounds
         time_bounds.append((lo, hi))
 
     # Check if all time bounds are identical
@@ -860,7 +860,7 @@ def build_brackets_for_find(
     result = is_chunkable_query(query, time_field, sort_spec)
 
     bounds = result.bounds
-    3
+
     # Handle REJECT mode - invalid query syntax or contradictory constraints
     if result.mode == ChunkabilityMode.REJECT:
         return False, result.reason, [], (None, None)
@@ -1100,11 +1100,11 @@ def build_brackets_for_find(
             eff.update(global_and)
         eff.update(br)
 
-        bounds, _ = extract_time_bounds_recursive(eff, time_field)
-        if bounds is None:
+        br_bounds, _ = extract_time_bounds_recursive(eff, time_field)
+        if br_bounds is None:
             lo, hi, hi_inclusive, lo_inclusive = None, None, False, True
         else:
-            lo, hi, hi_inclusive, lo_inclusive = bounds
+            lo, hi, hi_inclusive, lo_inclusive = br_bounds
         is_full = lo is not None and hi is not None
 
         # Remove time field from static filter
