@@ -50,3 +50,12 @@ ignore = []
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]
+"tests/**" = ["F841"]  # Allow unused variables in tests
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+reportShadowedImports = false
+reportUnusedVariable = false
+reportGeneralTypeIssues = "warning"  # Downgrade type issues to warnings

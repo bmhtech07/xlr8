@@ -1279,7 +1279,7 @@ def check_negation_safety(query: Dict[str, Any], time_field: str) -> Tuple[bool,
         if time_field in obj:
             return True
 
-        for key, value in obj.items():
+        for _key, value in obj.items():
             if isinstance(value, dict):
                 if references_time_field(value, depth + 1):
                     return True
@@ -1305,7 +1305,7 @@ def check_negation_safety(query: Dict[str, Any], time_field: str) -> Tuple[bool,
                     if op in time_value:
                         negations.append(op)
 
-        for key, value in obj.items():
+        for _key, value in obj.items():
             if isinstance(value, dict):
                 negations.extend(find_time_negations(value))
             elif isinstance(value, list):
@@ -1437,13 +1437,15 @@ def is_chunkable_query(
     # Step 1: Normalize query structure
     normalized, complexity_flags = normalize_query(query)
 
+    # Default bounds for cases where time_bounds is None
+    defaults = (None, None, False, True)
+
     # Step 2: Check nested $or (SINGLE tier - complex but executable)
     if complexity_flags["nested_or"]:
         # Extract time bounds for single-worker execution
-        time_bounds, has_time_ref = extract_time_bounds_recursive(
+        time_bounds, _has_time_ref = extract_time_bounds_recursive(
             normalized, time_field
         )
-        defaults = (None, None, False, True)
         lo, hi, hi_inclusive, lo_inclusive = time_bounds or defaults
 
         return ChunkabilityResult(

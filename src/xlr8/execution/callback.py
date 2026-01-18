@@ -9,7 +9,7 @@ This module implements a two-phase approach:
 
 PHASE 1: Download to Cache (reuses existing Rust backend)
 ────────────────────────────────────────────────────────────────────────────────
-    MongoDB ----> Rust Workers ----> Parquet Cache (on disk)
+    MongoDB --> Rust Workers --> Parquet Cache (on disk)
 
     Uses execute_parallel_stream_to_cache() - battle-tested, memory-safe.
 
@@ -20,19 +20,19 @@ PHASE 2: Partition + Parallel Callbacks
        - Create work items for each partition
 
     2. Execute callbacks in parallel (ThreadPoolExecutor):
-       - Each worker: DuckDB query --> PyArrow Table --> decode --> callback()
-       - DuckDB releases GIL --> true parallelism
+       - Each worker: DuckDB query -> PyArrow Table -> decode -> callback()
+       - DuckDB releases GIL -> true parallelism
        - User callbacks can use non-picklable objects (boto3, etc.)
 
 EDGE CASES HANDLED:
 ────────────────────────────────────────────────────────────────────────────────
-    - NULL values in partition_by fields --> grouped as one partition
-    - Empty partitions (no data in time bucket) --> skipped
-    - Parent fields (e.g., "metadata") --> expanded to child fields
-    - Types.Any() fields --> decoded based on any_type_strategy
-    - ObjectIds --> converted to strings (same as to_polars)
-    - Large partitions --> DuckDB streams internally, memory-safe
-    - Timezone handling --> all datetimes normalized to UTC
+    - NULL values in partition_by fields -> grouped as one partition
+    - Empty partitions (no data in time bucket) -> skipped
+    - Parent fields (e.g., "metadata") -> expanded to child fields
+    - Types.Any() fields -> decoded based on any_type_strategy
+    - ObjectIds -> converted to strings (same as to_polars)
+    - Large partitions -> DuckDB streams internally, memory-safe
+    - Timezone handling -> all datetimes normalized to UTC
 
 ================================================================================
 """
@@ -42,7 +42,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Literal, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, cast
 
 import polars as pl
 import pyarrow as pa
@@ -51,9 +51,6 @@ from xlr8.schema.types import Any as AnyType
 from xlr8.schema.types import ObjectId as ObjectIdType
 
 logger = logging.getLogger(__name__)
-
-# Suppress unused import warning - ObjectIdType used in _convert_objectids
-_ = ObjectIdType
 
 
 @dataclass
@@ -76,7 +73,7 @@ def _expand_parent_fields(
     Expand parent fields to their children in schema definition order.
 
     When user specifies a parent field like "metadata" but the schema has
-    flattened fields like "metadata.device_id", expand to all children.
+    flattened fields like "metadata.vessel_id", expand to all children.
 
     Args:
         fields: Original field list
@@ -112,10 +109,12 @@ def _expand_parent_fields(
                 expanded.extend(children)
             else:
                 raise ValueError(
-                    f"Partition field '{field_name}' not found in schema "
-                    f"and has no child fields. "
-                    f"Available fields: {sorted(all_schema_fields)[:10]}"
-                    + ("..." if len(all_schema_fields) > 10 else "")
+                    (
+                        f"Partition field '{field_name}' not found in schema. "
+                        "No child fields. "
+                        f"Available fields: {sorted(all_schema_fields)[:10]}"
+                        + ("..." if len(all_schema_fields) > 10 else "")
+                    )
                 )
 
     return expanded
@@ -126,9 +125,9 @@ def _timedelta_to_duckdb_interval(td: timedelta) -> str:
     Convert Python timedelta to DuckDB interval string.
 
     Examples:
-        timedelta(days=7) --> "7 days"
-        timedelta(hours=16) --> "16 hours"
-        timedelta(minutes=30) --> "30 minutes"
+        timedelta(days=7) -> "7 days"
+        timedelta(hours=16) -> "16 hours"
+        timedelta(minutes=30) -> "30 minutes"
     """
     total_seconds = int(td.total_seconds())
 
@@ -181,7 +180,7 @@ def _build_partition_plan(
     parquet_files = list(cache_path.glob("*.parquet"))
 
     if not parquet_files:
-        logger.warning(f"No parquet files found in {cache_dir}")
+        logger.warning("No parquet files found in %s", cache_dir)
         return []
 
     file_paths = [str(f) for f in parquet_files]
@@ -203,7 +202,10 @@ def _build_partition_plan(
             conn.execute(f"SET threads = {threads}")
 
         # Get global min and floor to start of day
-        global_result = conn.execute(global_min_query).fetchone()
+        global_result = cast(
+            Optional[Tuple[Any, ...]],
+            conn.execute(global_min_query).fetchone(),
+        )
         if global_result is None or global_result[0] is None:
             logger.warning("No data found in parquet files")
             conn.close()
@@ -217,11 +219,14 @@ def _build_partition_plan(
 
         # Floor to start of day (zero hours, mins, seconds, microseconds)
         floored_start = global_min_time.replace(
-            hour=0, minute=0, second=0, microsecond=0
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
         )
 
         logger.info(
-            "Natural time boundary: floored %s --> %s",
+            "Natural time boundary: floored %s -> %s",
             global_min_time.isoformat(),
             floored_start.isoformat(),
         )
@@ -262,7 +267,7 @@ def _build_partition_plan(
         """
 
         result = conn.execute(query).fetchall()
-        columns = [desc[0] for desc in conn.execute(query).description]
+        columns = [desc[0] for desc in conn.execute(query).description]  # type: ignore[union-attr]
         conn.close()
 
         # Build work items from results
@@ -311,9 +316,8 @@ def _build_partition_plan(
 
         return work_items
 
-    except Exception as e:
-        logger.error(f"Failed to build partition plan: {e}")
-        raise
+    except (duckdb.Error, KeyError, AttributeError, TypeError, ValueError) as e:
+        logger.error("Failed to build partition plan: %s", e)
         raise
 
 
@@ -386,7 +390,7 @@ def _decode_struct_values_polars(
     Decode struct-encoded Any-typed columns back to actual values (Polars).
 
     This is copied from reader.py to avoid circular imports and reuse
-    battle-tested Polars decode logic. DuckDB --> Polars --> decode --> Arrow.
+    battle-tested Polars decode logic. DuckDB -> Polars -> decode -> Arrow.
 
     Args:
         df: Polars DataFrame from DuckDB
@@ -416,9 +420,7 @@ def _decode_struct_values_polars(
 
                 try:
                     # Get field names from the struct
-                    struct_fields = (
-                        col_dtype.fields if hasattr(col_dtype, "fields") else []
-                    )
+                    struct_fields = cast(Any, getattr(col_dtype, "fields", []))
                     field_names = (
                         [f.name for f in struct_fields] if struct_fields else []
                     )
@@ -459,15 +461,14 @@ def _decode_struct_values_polars(
                             )
 
                         # ObjectId, decimal, etc. (already strings)
-                        str_fields_to_check = [
+                        for str_field in [
                             "objectid_value",
                             "decimal128_value",
                             "regex_value",
                             "binary_value",
                             "document_value",
                             "array_value",
-                        ]
-                        for str_field in str_fields_to_check:
+                        ]:
                             if str_field in field_names:
                                 coalesce_exprs.append(
                                     pl.col(field_name).struct.field(str_field)
@@ -475,7 +476,7 @@ def _decode_struct_values_polars(
 
                         if coalesce_exprs:
                             df = df.with_columns(
-                                pl.coalesce(*coalesce_exprs).alias(field_name)
+                                pl.coalesce(coalesce_exprs).alias(field_name)
                             )
 
                     else:  # "float" strategy (default)
@@ -512,7 +513,7 @@ def _decode_struct_values_polars(
                                 )
                             else:
                                 df = df.with_columns(
-                                    pl.coalesce(*coalesce_exprs).alias(field_name)
+                                    pl.coalesce(coalesce_exprs).alias(field_name)
                                 )
                         else:
                             logger.warning(
@@ -521,7 +522,7 @@ def _decode_struct_values_polars(
                                 field_name,
                                 field_names,
                             )
-                except Exception as e:
+                except (KeyError, AttributeError, TypeError, ValueError) as e:
                     logger.warning("Error decoding struct '%s': %s", field_name, e)
 
     return df
@@ -568,7 +569,7 @@ def _execute_partition_callback(
     any_type_strategy: Literal["float", "string", "keep_struct"],
     sort_ascending: bool,
     memory_limit_mb: int,
-    threads: int,
+    threads: int = 1,
 ) -> Dict[str, Any]:
     """
     Execute callback for a single partition (runs in thread).
@@ -613,11 +614,12 @@ def _execute_partition_callback(
         if memory_limit_mb:
             conn.execute(f"SET memory_limit = '{memory_limit_mb}MB'")
 
-        # Each worker uses 1 thread (parallelism comes from ThreadPoolExecutor)
-        conn.execute("SET threads = 1")
+        # ThreadPoolExecutor provides parallelism; set DuckDB threads per worker here.
+        conn.execute(f"SET threads = {threads}")
 
-        # Fetch as Polars DataFrame (DuckDB native support)
-        polars_df = conn.execute(query).pl()
+        # Fetch as Arrow Table (DuckDB native support) and convert to Polars
+        arrow_tmp = conn.execute(query).fetch_arrow_table()
+        polars_df = cast(pl.DataFrame, pl.from_arrow(arrow_tmp))
         conn.close()
 
         if len(polars_df) == 0:
@@ -656,8 +658,8 @@ def _execute_partition_callback(
             "skipped": False,
         }
 
-    except Exception as e:
-        logger.error(f"Partition {work_item.index} failed: {e}")
+    except Exception as e:  # noqa: BLE001
+        logger.error("Partition %d failed: %s", work_item.index, e)
         raise
 
 
@@ -698,7 +700,7 @@ def execute_partitioned_callback(
     time_field = schema.time_field
 
     # Expand parent fields to children
-    # (e.g., "metadata" --> ["metadata.device_id", "metadata.logConfig_id"])
+    # (e.g., "metadata" -> ["metadata.vessel_id", "metadata.logConfig_id"])
     if partition_by:
         partition_by = _expand_parent_fields(partition_by, schema)
 
@@ -765,8 +767,8 @@ def execute_partitioned_callback(
                 if result.get("skipped"):
                     skipped += 1
 
-            except Exception as e:
-                logger.error(f"Partition {work_item.index} failed: {e}")
+            except Exception as e:  # noqa: BLE001
+                logger.error("Partition %d failed: %s", work_item.index, e)
                 raise RuntimeError(
                     f"Callback failed for partition {work_item.index} "
                     f"(time: {work_item.time_start} to {work_item.time_end}, "
@@ -788,9 +790,3 @@ def execute_partitioned_callback(
         "skipped_partitions": skipped,
         "duration_s": duration,
     }
-
-
-__all__ = [
-    "PartitionWorkItem",
-    "execute_partitioned_callback",
-]

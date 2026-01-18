@@ -84,7 +84,7 @@ import logging
 import warnings
 from collections import defaultdict
 from datetime import datetime, timedelta
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 from bson import encode as bson_encode
 
@@ -95,6 +95,9 @@ from xlr8.execution.planner import build_execution_plan
 from xlr8.schema import Schema
 
 logger = logging.getLogger(__name__)
+
+
+ChunkForRust = Tuple[Dict[str, Any], int, Optional[datetime], Optional[datetime]]
 
 
 def execute_parallel_stream_to_cache(
@@ -444,7 +447,7 @@ def execute_parallel_stream_to_cache(
 
 
 def serialize_chunks_for_rust(
-    chunks: List[Tuple[Dict[str, Any], int, datetime, datetime]],
+    chunks: Sequence[ChunkForRust],
 ) -> bytes:
     """
     Serialize chunks to BSON bytes for Rust backend.

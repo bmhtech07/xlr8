@@ -8,6 +8,7 @@ Covers:
 """
 
 from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, cast
 
 from bson import ObjectId
 from bson import decode as bson_decode
@@ -47,7 +48,7 @@ class TestSerializeChunksForRust:
         ]
 
         bson_bytes = serialize_chunks_for_rust(chunks)
-        decoded = bson_decode(bson_bytes)
+        decoded = cast(Dict[str, Any], bson_decode(bson_bytes))
 
         # Should have chunks key
         assert "chunks" in decoded
@@ -67,7 +68,7 @@ class TestSerializeChunksForRust:
         ]
 
         bson_bytes = serialize_chunks_for_rust(chunks)
-        decoded = bson_decode(bson_bytes)
+        decoded = cast(Dict[str, Any], bson_decode(bson_bytes))
 
         # Timestamps should be present
         assert "start_ms" in decoded["chunks"][0]
@@ -86,7 +87,7 @@ class TestSerializeChunksForRust:
         ]
 
         bson_bytes = serialize_chunks_for_rust(chunks)
-        decoded = bson_decode(bson_bytes)
+        decoded = cast(Dict[str, Any], bson_decode(bson_bytes))
 
         # None timestamps should be handled (might be null or omitted)
         chunk = decoded["chunks"][0]
@@ -118,7 +119,7 @@ class TestSerializeChunksForRust:
         ]
 
         bson_bytes = serialize_chunks_for_rust(chunks)
-        decoded = bson_decode(bson_bytes)
+        decoded = cast(Dict[str, Any], bson_decode(bson_bytes))
 
         assert len(decoded["chunks"]) == 3
         # Chunk indices should be preserved
@@ -155,7 +156,7 @@ class TestExecuteParallelStreamToCache:
         assert len(bson_bytes) > 0
 
         # Should be decodable
-        decoded = bson_decode(bson_bytes)
+        decoded = cast(Dict[str, Any], bson_decode(bson_bytes))
         assert "chunks" in decoded
         assert len(decoded["chunks"]) == 2
 
@@ -186,7 +187,7 @@ class TestBoundaryOperatorChunkConstruction:
         # Query with $lte - inclusive upper bound
         query = {"sensor_id": "sensor_1", "timestamp": {"$gte": t1, "$lte": t2}}
 
-        is_chunkable, reason, brackets, bounds = build_brackets_for_find(
+        is_chunkable, _reason, brackets, _bounds = build_brackets_for_find(
             query, "timestamp"
         )
         assert is_chunkable is True
@@ -237,7 +238,7 @@ class TestBoundaryOperatorChunkConstruction:
         # Query with $lt - exclusive upper bound
         query = {"sensor_id": "sensor_1", "timestamp": {"$gte": t1, "$lt": t2}}
 
-        is_chunkable, reason, brackets, bounds = build_brackets_for_find(
+        _is_chunkable, _reason, brackets, _bounds = build_brackets_for_find(
             query, "timestamp"
         )
         bracket = brackets[0]
@@ -278,7 +279,7 @@ class TestBoundaryOperatorChunkConstruction:
         # Query with $gt - exclusive lower bound
         query = {"sensor_id": "sensor_1", "timestamp": {"$gt": t1, "$lt": t2}}
 
-        is_chunkable, reason, brackets, bounds = build_brackets_for_find(
+        _is_chunkable, _reason, brackets, _bounds = build_brackets_for_find(
             query, "timestamp"
         )
         bracket = brackets[0]
@@ -311,7 +312,7 @@ class TestBoundaryOperatorChunkConstruction:
         # Query with $gte (most common)
         query = {"sensor_id": "sensor_1", "timestamp": {"$gte": t1, "$lt": t2}}
 
-        is_chunkable, reason, brackets, bounds = build_brackets_for_find(
+        _is_chunkable, _reason, brackets, _bounds = build_brackets_for_find(
             query, "timestamp"
         )
         bracket = brackets[0]
@@ -337,7 +338,7 @@ class TestBoundaryOperatorChunkConstruction:
         # Query with $lte - but intermediate chunks should still use $lt
         query = {"sensor_id": "sensor_1", "timestamp": {"$gte": t1, "$lte": t2}}
 
-        is_chunkable, reason, brackets, bounds = build_brackets_for_find(
+        _is_chunkable, _reason, brackets, _bounds = build_brackets_for_find(
             query, "timestamp"
         )
         bracket = brackets[0]
@@ -388,7 +389,7 @@ class TestBoundaryDataValidation:
 
         query = {"sensor_id": "sensor_1", "timestamp": {"$gte": t1, "$lte": boundary}}
 
-        is_chunkable, reason, brackets, bounds = build_brackets_for_find(
+        _is_chunkable, _reason, brackets, _bounds = build_brackets_for_find(
             query, "timestamp"
         )
         bracket = brackets[0]
@@ -405,9 +406,9 @@ class TestBoundaryDataValidation:
         doc_timestamp = boundary  # Document at exact boundary
 
         if "$lte" in time_clause:
-            matches = doc_timestamp <= time_clause["$lte"]
+            matches = doc_timestamp <= cast(datetime, time_clause["$lte"])
         else:
-            matches = doc_timestamp < time_clause["$lt"]
+            matches = doc_timestamp < cast(datetime, time_clause["$lt"])
 
         assert matches is True, "Document at exact $lte boundary should be included"
 
@@ -425,7 +426,7 @@ class TestBoundaryDataValidation:
 
         query = {"sensor_id": "sensor_1", "timestamp": {"$gte": t1, "$lt": boundary}}
 
-        is_chunkable, reason, brackets, bounds = build_brackets_for_find(
+        _is_chunkable, _reason, brackets, _bounds = build_brackets_for_find(
             query, "timestamp"
         )
         bracket = brackets[0]
@@ -442,9 +443,9 @@ class TestBoundaryDataValidation:
         doc_timestamp = boundary
 
         if "$lte" in time_clause:
-            matches = doc_timestamp <= time_clause["$lte"]
+            matches = doc_timestamp <= cast(datetime, time_clause["$lte"])
         else:
-            matches = doc_timestamp < time_clause["$lt"]
+            matches = doc_timestamp < cast(datetime, time_clause["$lt"])
 
         assert matches is False, "Document at exact $lt boundary should be excluded"
 
@@ -459,7 +460,7 @@ class TestBoundaryDataValidation:
 
         query = {"sensor_id": "sensor_1", "timestamp": {"$gt": boundary, "$lt": t2}}
 
-        is_chunkable, reason, brackets, bounds = build_brackets_for_find(
+        _is_chunkable, _reason, brackets, _bounds = build_brackets_for_find(
             query, "timestamp"
         )
         bracket = brackets[0]
@@ -475,9 +476,9 @@ class TestBoundaryDataValidation:
         doc_timestamp = boundary
 
         if "$gte" in time_clause:
-            matches = doc_timestamp >= time_clause["$gte"]
+            matches = doc_timestamp >= cast(datetime, time_clause["$gte"])
         else:
-            matches = doc_timestamp > time_clause["$gt"]
+            matches = doc_timestamp > cast(datetime, time_clause["$gt"])
 
         assert matches is False, "Document at exact $gt boundary should be excluded"
 
@@ -492,7 +493,7 @@ class TestBoundaryDataValidation:
 
         query = {"sensor_id": "sensor_1", "timestamp": {"$gte": boundary, "$lt": t2}}
 
-        is_chunkable, reason, brackets, bounds = build_brackets_for_find(
+        _is_chunkable, _reason, brackets, _bounds = build_brackets_for_find(
             query, "timestamp"
         )
         bracket = brackets[0]
@@ -508,8 +509,8 @@ class TestBoundaryDataValidation:
         doc_timestamp = boundary
 
         if "$gte" in time_clause:
-            matches = doc_timestamp >= time_clause["$gte"]
+            matches = doc_timestamp >= cast(datetime, time_clause["$gte"])
         else:
-            matches = doc_timestamp > time_clause["$gt"]
+            matches = doc_timestamp > cast(datetime, time_clause["$gt"])
 
         assert matches is True, "Document at exact $gte boundary should be included"
