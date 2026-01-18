@@ -11,9 +11,7 @@ during parallel MongoDB fetches. Key concepts:
 1. BSON DOCUMENT MEMORY OVERHEAD (15x Multiplier)
    When MongoDB sends documents over the wire (avg_doc_size_bytes), they expand
    to ~15x in memory due to heap allocations, pointers, and HashMap
-   structures. Measured: 14.8x, rounded to 15x for safety. Obviously this varies
-   by document shape, but 15x is a reasonable upper bound for planning as per
-    benchmarks.
+   structures. Measured: 14.8x, rounded to 15x for safety.
 
 2. BUFFER MANAGEMENT
    Each async worker maintains its own MemoryAwareBuffer that:
@@ -41,6 +39,7 @@ from enum import Enum
 from typing import Optional, Union
 
 logger = logging.getLogger(__name__)
+
 
 # =============================================================================
 # BACKEND CONFIGURATION
@@ -104,8 +103,9 @@ PYTHON_CONFIG = BackendConfig(
 DEFAULT_BACKEND = Backend.RUST
 DEFAULT_CONFIG = RUST_CONFIG
 
+
 # =============================================================================
-# SHARED CONSTANTS TODO: Might move to constants.py
+# SHARED CONSTANTS
 # =============================================================================
 
 # MongoDB cursor efficiency: below this, network overhead dominates
@@ -113,6 +113,31 @@ MIN_BATCH_SIZE = 2_000
 
 # Buffer headroom for in-flight batch (flush check happens after batch added)
 BATCH_HEADROOM_RATIO = 0.2
+
+
+# =============================================================================
+# EXECUTION PLAN
+# =============================================================================
+
+
+@dataclass
+class ExecutionPlan:
+    """
+    Execution plan for parallel query execution.
+
+    Attributes:
+        worker_count: Number of parallel workers
+        batch_size_docs: Documents per MongoDB cursor batch
+        chunk_size: Time chunk size as timedelta
+        estimated_ram_mb: Estimated peak RAM usage
+        flush_trigger_mb: Memory threshold to trigger buffer flush (per worker)
+    """
+
+    worker_count: int
+    batch_size_docs: int
+    chunk_size: timedelta
+    estimated_ram_mb: int
+    flush_trigger_mb: int
 
 
 # =============================================================================
@@ -190,31 +215,6 @@ def calculate_flush_trigger(
     return flush_trigger_mb, batch_size_docs
 
 
-# =============================================================================
-# EXECUTION PLAN
-# =============================================================================
-
-
-@dataclass
-class ExecutionPlan:
-    """
-    Execution plan for parallel query execution.
-
-    Attributes:
-        worker_count: Number of parallel workers
-        batch_size_docs: Documents per MongoDB cursor batch
-        chunk_size: Time chunk size as timedelta
-        estimated_ram_mb: Estimated peak RAM usage
-        flush_trigger_mb: Memory threshold to trigger buffer flush (per worker)
-    """
-
-    worker_count: int
-    batch_size_docs: int
-    chunk_size: timedelta
-    estimated_ram_mb: int
-    flush_trigger_mb: int
-
-
 def build_execution_plan(
     start_time: Union[datetime, None],
     end_time: Union[datetime, None],
@@ -244,8 +244,8 @@ def build_execution_plan(
         max_workers: Maximum workers (user-specified)
         peak_ram_limit_mb: Total RAM budget (user-specified)
         chunking_granularity: Time chunk size (optional, for time-range mode)
-        num_unchunked_queries: Number of unchunked queries (partial +
-        unbounded brackets)
+        num_unchunked_queries: Number of unchunked queries
+            (partial + unbounded brackets)
         backend: Execution backend (RUST or PYTHON)
 
     Returns:
@@ -273,12 +273,8 @@ def build_execution_plan(
 
         if chunking_granularity is not None:
             chunk_size_seconds = int(chunking_granularity.total_seconds())
-            time_chunks = max(
-                1,
-                int(
-                    (time_range_seconds + chunk_size_seconds - 1) // chunk_size_seconds
-                ),
-            )
+            chunks_needed = time_range_seconds + chunk_size_seconds - 1
+            time_chunks = max(1, int(chunks_needed // chunk_size_seconds))
         else:
             # No granularity specified, treat as single chunk
             time_chunks = 1
@@ -290,8 +286,7 @@ def build_execution_plan(
     if num_chunks == 0:
         raise ValueError(
             "No work items found. Either (start_time, end_time) or "
-            "num_unchunked_queries "
-            "must be provided to determine work distribution."
+            "num_unchunked_queries must be provided."
         )
     # ==========================================================================
     # DETERMINE WORKER COUNT
@@ -350,11 +345,10 @@ def build_execution_plan(
     estimated_ram_mb = min(estimated_ram_mb, peak_ram_limit_mb)
 
     # Store chunk size as timedelta
-    chunk_size_td = (
-        timedelta(seconds=chunk_size_seconds)
-        if chunk_size_seconds is not None
-        else timedelta(days=1)
-    )
+    if chunk_size_seconds is not None:
+        chunk_size_td = timedelta(seconds=chunk_size_seconds)
+    else:
+        chunk_size_td = timedelta(days=1)
 
     return ExecutionPlan(
         worker_count=worker_count,
@@ -366,10 +360,13 @@ def build_execution_plan(
 
 
 __all__ = [
-    # Data structures
     "Backend",
     "BackendConfig",
+    "RUST_CONFIG",
+    "PYTHON_CONFIG",
+    "DEFAULT_BACKEND",
+    "DEFAULT_CONFIG",
     "ExecutionPlan",
-    # Main public function
+    "calculate_flush_trigger",
     "build_execution_plan",
 ]
