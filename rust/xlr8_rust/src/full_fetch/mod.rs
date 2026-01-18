@@ -84,7 +84,7 @@ fn parse_bson_chunks(chunks_bson: &[u8]) -> PyResult<Vec<BsonChunk>> {
 /// Fetch MongoDB data in parallel using BSON-encoded chunk filters.
 /// Returns dict with total_docs, total_files, duration_secs.
 #[pyfunction]
-#[pyo3(signature = (mongodb_uri, db_name, collection_name, chunks_bson, schema_json, cache_dir, num_workers, batch_size, flush_trigger_mb, avg_doc_size_bytes, sort_spec_json, time_field, projection_json))]
+#[pyo3(signature = (mongodb_uri, db_name, collection_name, chunks_bson, schema_json, cache_dir, num_workers, batch_size, flush_trigger_mb, avg_doc_size_bytes, sort_spec_json, time_field, projection_json, row_group_size=None))]
 pub fn fetch_chunks_bson(
     py: Python<'_>,
     mongodb_uri: &str,
@@ -100,6 +100,7 @@ pub fn fetch_chunks_bson(
     sort_spec_json: &str,  // Sort specification as JSON
     time_field: &str,      // Time field name for timestamp tracking
     projection_json: &str, // MongoDB projection as JSON (e.g., '{"field": 1}')
+    row_group_size: Option<usize>, // Parquet row group size (None = use Arrow default)
 ) -> PyResult<HashMap<String, PyObject>> {
     // Parse BSON chunks (handles ObjectId, datetime, etc.)
     let chunks = parse_bson_chunks(&chunks_bson)?;
@@ -147,6 +148,7 @@ pub fn fetch_chunks_bson(
                 let cache_dir = Arc::new(cache_dir);
                 let flush_trigger_mb = Arc::new(flush_trigger_mb);
                 let avg_doc_size_bytes = Arc::new(avg_doc_size_bytes);
+                let row_group_size = Arc::new(row_group_size);
                 
                 // Parse sort_spec from JSON
                 let sort_spec = parse_sort_spec(sort_spec_json);
@@ -183,6 +185,7 @@ pub fn fetch_chunks_bson(
                             let time_field = Arc::clone(&time_field);
                             let flush_trigger_mb = Arc::clone(&flush_trigger_mb);
                             let avg_doc_size_bytes = Arc::clone(&avg_doc_size_bytes);
+                            let row_group_size = Arc::clone(&row_group_size);
                             let projection_cloned = projection.clone();
                             let _chunk_count = my_chunks.len();
                             
@@ -236,6 +239,7 @@ pub fn fetch_chunks_bson(
                                             let cache_dir_clone = cache_dir.clone();
                                             let schema_spec_clone = schema_spec.clone();
                                             let arrow_schema_clone = arrow_schema.clone();
+                                            let row_group_size_clone = row_group_size.clone();
                                             let file_count = worker_file_count;
                                             
                                             tokio::task::spawn_blocking(move || {
@@ -254,7 +258,7 @@ pub fn fetch_chunks_bson(
                                                 );
                                                 
                                                 let batch = build_record_batch(&docs, &schema_spec_clone, &arrow_schema_clone)?;
-                                                write_parquet_file(&batch, &filepath)?;
+                                                write_parquet_file(&batch, &filepath, *row_group_size_clone)?;
                                                 
                                                 Ok::<_, PyErr>(())
                                             })
@@ -276,6 +280,7 @@ pub fn fetch_chunks_bson(
                                     let cache_dir_clone = cache_dir.clone();
                                     let schema_spec_clone = schema_spec.clone();
                                     let arrow_schema_clone = arrow_schema.clone();
+                                    let row_group_size_clone = row_group_size.clone();
                                     let file_count = worker_file_count;
                                     
                                     tokio::task::spawn_blocking(move || {
@@ -294,7 +299,7 @@ pub fn fetch_chunks_bson(
                                         );
                                         
                                         let batch = build_record_batch(&docs, &schema_spec_clone, &arrow_schema_clone)?;
-                                        write_parquet_file(&batch, &filepath)?;
+                                        write_parquet_file(&batch, &filepath, *row_group_size_clone)?;
                                         
                                         Ok::<_, PyErr>(())
                                     })
