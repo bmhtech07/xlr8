@@ -10,13 +10,24 @@ use parquet::{
 };
 
 /// Write a RecordBatch to a Parquet file with ZSTD compression.
-pub fn write_parquet_file(batch: &RecordBatch, filepath: &str) -> PyResult<()> {
+///
+/// If row_group_size is None, uses Arrow's default (1024 rows).
+pub fn write_parquet_file(
+    batch: &RecordBatch,
+    filepath: &str,
+    row_group_size: Option<usize>,
+) -> PyResult<()> {
     let file = std::fs::File::create(filepath)
         .map_err(|e| PyValueError::new_err(format!("Failed to create file: {e}")))?;
     
-    let props = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(Default::default()))
-        .build();
+    let mut props_builder = WriterProperties::builder().set_compression(Compression::ZSTD(Default::default()));
+
+    // Set row group size if provided
+    if let Some(size) = row_group_size {
+        props_builder = props_builder.set_max_row_group_size(size);
+    }
+
+    let props = props_builder.build();
     
     let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props))
         .map_err(|e| PyValueError::new_err(format!("Failed to create writer: {e}")))?;
