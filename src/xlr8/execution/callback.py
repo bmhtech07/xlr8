@@ -700,7 +700,7 @@ def execute_partitioned_callback(
     time_field = schema.time_field
 
     # Expand parent fields to children
-    # (e.g., "metadata" -> ["metadata.vessel_id", "metadata.logConfig_id"])
+    # (e.g., "metadata" -> ["metadata.vessel_id", "metadata.sensor_id"])
     if partition_by:
         partition_by = _expand_parent_fields(partition_by, schema)
 

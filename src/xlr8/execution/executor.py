@@ -23,8 +23,8 @@ execute_parallel_stream_to_cache() is called with:
 │ Example:                                                                    │
 │ {"$or": [...], "timestamp": {...}}                                          │
 │           ↓                                                                 │
-│ [Bracket(static={"logConfig_id": "64a..."}, time=Jan-Jul),                  │
-│  Bracket(static={"logConfig_id": "64b..."}, time=Jan-Jul)]                  │
+│ [Bracket(static={"sensor_id": "64a..."}, time=Jan-Jul),                  │
+│  Bracket(static={"sensor_id": "64b..."}, time=Jan-Jul)]                  │
 └─────────────────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -45,8 +45,8 @@ execute_parallel_stream_to_cache() is called with:
 │ Each bracket's time range --> multiple chunks                               │
 │                                                                             │
 │ Example (Bracket 1 with Jan-Jul range, 14-day chunks):                      │
-│ --> Chunk 1.1: Jan 1-15 with filter {"logConfig_id": "64a..."}              │
-│ --> Chunk 1.2: Jan 15-29 with filter {"logConfig_id": "64a..."}             │
+│ --> Chunk 1.1: Jan 1-15 with filter {"sensor_id": "64a..."}              │
+│ --> Chunk 1.2: Jan 15-29 with filter {"sensor_id": "64a..."}             │
 │ --> ...                                                                     │
 │ --> Chunk 1.13: Jun 17 - Jul 1                                              │
 │                                                                             │

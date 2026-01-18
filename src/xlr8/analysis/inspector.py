@@ -1642,3 +1642,248 @@ def has_natural_sort(sort_spec: Optional[List[Tuple[str, int]]]) -> bool:
             continue
 
     return False
+
+
+def validate_sort_field(
+    sort_spec: Optional[List[Tuple[str, int]]],
+    schema: Any,
+) -> ValidationResult:
+    """
+    Validate that sort fields are compatible with XLR8.
+
+    Now supports:
+    - Parent field sorting (e.g., "metadata" when schema has "metadata.region_id")
+    - Types.Any() sorting with MongoDB-compatible type ordering
+
+    Args:
+        sort_spec: Sort specification from cursor, e.g.,
+        [("timestamp", 1), ("value", -1)]
+        schema: XLR8 Schema object with field type definitions
+
+    Returns:
+        ValidationResult with is_valid=True if sort is allowed.
+
+    Example:
+        >>> from xlr8.schema import Schema, Types
+        >>> schema = Schema(
+        ...     time_field="timestamp",
+        ...     fields={
+        ...         "timestamp": Types.Timestamp("ms"),
+        ...         "metadata.account_id": Types.ObjectId(),
+        ...         "value": Types.Any(),  # Now allowed!
+        ...     }
+        ... )
+        >>> validate_sort_field([("timestamp", 1)], schema)
+        ValidationResult(is_valid=True, reason='')
+
+        >>> validate_sort_field([("metadata", 1)], schema)  # Parent field
+        ValidationResult(is_valid=True, reason='')
+
+        >>> validate_sort_field([("value", 1)], schema)  # Any type
+        ValidationResult(is_valid=True, reason='')
+    """
+    if not sort_spec:
+        return ValidationResult(True, "")
+
+    # Check for $natural sort (insertion order)
+    if has_natural_sort(sort_spec):
+        return ValidationResult(
+            False,
+            "$natural sort (insertion order) is incompatible with time-based chunking. "
+            "Use time field sorting instead: [('timestamp', 1)]",
+        )
+
+    if schema is None or not hasattr(schema, "fields"):
+        # No schema to validate against - allow sort
+        return ValidationResult(True, "")
+
+    for field_name, direction in sort_spec:
+        # Check if field exists directly in schema
+        if field_name in schema.fields:
+            # Field exists - always valid now (Any() supported)
+            continue
+
+        # Check if it's a parent field (e.g., "metadata" for "metadata.region_id")
+        is_parent = False
+        for schema_field in schema.fields.keys():
+            if schema_field.startswith(field_name + "."):
+                is_parent = True
+                break
+
+        if is_parent:
+            # Parent field sorting is valid
+            continue
+
+        # Field not found in schema - error
+        available_fields = sorted(schema.fields.keys())[:10]
+        return ValidationResult(
+            False,
+            f"Sort field '{field_name}' not found in schema. "
+            f"Available fields: {available_fields}"
+            + ("..." if len(schema.fields) > 10 else ""),
+        )
+
+    return ValidationResult(True, "")
+
+
+def get_sort_field_info(
+    sort_spec: List[Tuple[str, int]],
+    schema: Any,
+) -> List[dict]:
+    """
+    Analyze sort fields and return metadata for DuckDB sorting.
+
+    Returns a list of dicts with:
+    - field: Original field name
+    - direction: 1 (ASC) or -1 (DESC)
+    - is_any: True if Types.Any()
+    - is_list: True if Types.List() (requires DuckDB - pandas can't sort arrays)
+    - is_parent: True if parent field (expand to children)
+    - child_fields: List of child fields if is_parent
+    """
+    # Import here to avoid circular dependency (schema imports analysis)
+    try:
+        from xlr8.schema.types import Any as AnyType
+        from xlr8.schema.types import List as ListType
+    except ImportError:
+        AnyType = None
+        ListType = None
+
+    result = []
+
+    for field_name, direction in sort_spec:
+        info = {
+            "field": field_name,
+            "direction": direction,
+            "is_any": False,
+            "is_list": False,
+            "is_parent": False,
+            "child_fields": [],
+        }
+
+        # Check if field is in schema
+        if field_name in schema.fields:
+            field_type = schema.fields[field_name]
+            if AnyType and (
+                isinstance(field_type, AnyType)
+                or (isinstance(field_type, type) and issubclass(field_type, AnyType))
+            ):
+                info["is_any"] = True
+            elif ListType and isinstance(field_type, ListType):
+                info["is_list"] = True
+        else:
+            # Check for parent field
+            children = []
+            for schema_field in schema.fields.keys():
+                if schema_field.startswith(field_name + "."):
+                    children.append(schema_field)
+            if children:
+                info["is_parent"] = True
+                info["child_fields"] = sorted(children)  # Consistent order
+
+        result.append(info)
+
+    return result
+
+
+def generate_sort_sql(
+    sort_spec: List[Tuple[str, int]],
+    schema: Any,
+) -> str:
+    """
+    Generate DuckDB ORDER BY clause for advanced sorting.
+
+    Handles:
+    - Simple fields: ORDER BY "timestamp" ASC
+    - Parent fields: ORDER BY "metadata.region_id" DESC, "metadata.source_id" DESC
+    - Any() fields: Composite sort with type priority (MongoDB BSON order)
+
+    MongoDB BSON type ordering:
+    1. MinKey (internal)
+    2. Null
+    3. Numbers (int, float, decimal)
+    4. String
+    5. Object/Document
+    6. Array
+    7. Binary
+    8. ObjectId
+    9. Boolean
+    10. Date
+    11. Timestamp (internal)
+    12. Regex
+    13. MaxKey (internal)
+
+    Returns:
+        ORDER BY clause string (without "ORDER BY" prefix)
+    """
+    field_infos = get_sort_field_info(sort_spec, schema)
+    order_parts = []
+
+    for info in field_infos:
+        order = "ASC" if info["direction"] == 1 else "DESC"
+
+        if info["is_any"]:
+            # Composite sort for Any() type - MongoDB BSON ordering
+            field = info["field"]
+            # Type priority (matching MongoDB BSON order)
+            # We use the struct fields: null_value, float_value, int32_value,
+            # int64_value,
+            # string_value, document_value, array_value, binary_value,
+            # objectid_value,
+            # bool_value, datetime_value, regex_value, decimal128_value
+            type_priority = f"""
+                CASE
+                    WHEN "{field}".null_value = true THEN 2
+                    WHEN "{field}".float_value IS NOT NULL THEN 3
+                    WHEN "{field}".int32_value IS NOT NULL THEN 3
+                    WHEN "{field}".int64_value IS NOT NULL THEN 3
+                    WHEN "{field}".string_value IS NOT NULL THEN 4
+                    WHEN "{field}".document_value IS NOT NULL THEN 5
+                    WHEN "{field}".array_value IS NOT NULL THEN 6
+                    WHEN "{field}".binary_value IS NOT NULL THEN 7
+                    WHEN "{field}".objectid_value IS NOT NULL THEN 8
+                    WHEN "{field}".bool_value IS NOT NULL THEN 9
+                    WHEN "{field}".datetime_value IS NOT NULL THEN 10
+                    WHEN "{field}".regex_value IS NOT NULL THEN 12
+                    WHEN "{field}".decimal128_value IS NOT NULL THEN 3
+                    ELSE 99
+                END""".strip()
+
+            # Numeric value (for numeric types)
+            numeric_val = f"""COALESCE(
+                "{field}".float_value,
+                CAST("{field}".int64_value AS DOUBLE),
+                CAST("{field}".int32_value AS DOUBLE),
+                0
+            )"""
+
+            # String value (for string/objectid types)
+            string_val = f"""COALESCE(
+                "{field}".string_value,
+                "{field}".objectid_value,
+                "{field}".document_value,
+                "{field}".array_value,
+                ''
+            )"""
+
+            # Datetime value
+            datetime_val = f'"{field}".datetime_value'
+
+            # Bool value
+            bool_val = f'CAST("{field}".bool_value AS INTEGER)'
+
+            order_parts.append(f"({type_priority}) {order}")
+            order_parts.append(f"({numeric_val}) {order}")
+            order_parts.append(f"({string_val}) {order}")
+            order_parts.append(f"({datetime_val}) {order}")
+            order_parts.append(f"({bool_val}) {order}")
+
+        elif info["is_parent"]:
+            # Parent field - expand to all children
+            for child in info["child_fields"]:
+                order_parts.append(f'"{child}" {order}')
+        else:
+            # Simple field
+            order_parts.append(f'"{info["field"]}" {order}')
+
+    return ", ".join(order_parts)

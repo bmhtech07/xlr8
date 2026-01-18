@@ -23,7 +23,7 @@ class TestSerializeChunksForRust:
         """serialize_chunks_for_rust() should convert chunks to BSON bytes."""
         chunks = [
             (
-                {"logConfig_id": ObjectId("64a1b2c3d4e5f6a7b8c9d0e1")},
+                {"sensor_id": ObjectId("64a1b2c3d4e5f6a7b8c9d0e1")},
                 0,
                 datetime(2024, 1, 1, tzinfo=timezone.utc),
                 datetime(2024, 1, 15, tzinfo=timezone.utc),
@@ -40,7 +40,7 @@ class TestSerializeChunksForRust:
         oid = ObjectId("64a1b2c3d4e5f6a7b8c9d0e1")
         chunks = [
             (
-                {"logConfig_id": oid},
+                {"sensor_id": oid},
                 0,
                 datetime(2024, 1, 1, tzinfo=timezone.utc),
                 datetime(2024, 1, 15, tzinfo=timezone.utc),
@@ -54,7 +54,7 @@ class TestSerializeChunksForRust:
         assert "chunks" in decoded
         assert len(decoded["chunks"]) == 1
         # ObjectId should be preserved
-        assert decoded["chunks"][0]["filter"]["logConfig_id"] == oid
+        assert decoded["chunks"][0]["filter"]["sensor_id"] == oid
 
     def test_handles_datetime_to_milliseconds(self):
         """serialize_chunks_for_rust() should convert datetime to milliseconds."""
@@ -99,19 +99,19 @@ class TestSerializeChunksForRust:
         """serialize_chunks_for_rust() should handle multiple chunks."""
         chunks = [
             (
-                {"logConfig_id": ObjectId()},
+                {"sensor_id": ObjectId()},
                 0,
                 datetime(2024, 1, 1, tzinfo=timezone.utc),
                 datetime(2024, 1, 15, tzinfo=timezone.utc),
             ),
             (
-                {"logConfig_id": ObjectId()},
+                {"sensor_id": ObjectId()},
                 1,
                 datetime(2024, 1, 15, tzinfo=timezone.utc),
                 datetime(2024, 2, 1, tzinfo=timezone.utc),
             ),
             (
-                {"logConfig_id": ObjectId()},
+                {"sensor_id": ObjectId()},
                 2,
                 datetime(2024, 2, 1, tzinfo=timezone.utc),
                 datetime(2024, 2, 15, tzinfo=timezone.utc),
@@ -136,13 +136,13 @@ class TestExecuteParallelStreamToCache:
         # This test verifies the chunk serialization works
         chunks = [
             (
-                {"logConfig_id": ObjectId("64a1b2c3d4e5f6a7b8c9d0e1")},
+                {"sensor_id": ObjectId("64a1b2c3d4e5f6a7b8c9d0e1")},
                 0,
                 datetime(2024, 1, 1, tzinfo=timezone.utc),
                 datetime(2024, 1, 15, tzinfo=timezone.utc),
             ),
             (
-                {"logConfig_id": ObjectId("64a1b2c3d4e5f6a7b8c9d0e1")},
+                {"sensor_id": ObjectId("64a1b2c3d4e5f6a7b8c9d0e1")},
                 1,
                 datetime(2024, 1, 15, tzinfo=timezone.utc),
                 datetime(2024, 2, 1, tzinfo=timezone.utc),
