@@ -30,7 +30,7 @@ THE SOLUTION - UNION STRUCT:
 Store as a struct with ONE field populated, others null:
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│ ENCODE: Python value → Struct                                               │
+│ ENCODE: Python value -> Struct                                               │
 │                                                                             │
 │ encode_any(42.5) returns:                                                   │
 │ {                                                                           │
@@ -56,7 +56,7 @@ Store as a struct with ONE field populated, others null:
 └─────────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│ DECODE: Struct → Python value                                               │
+│ DECODE: Struct -> Python value                                               │
 │                                                                             │
 │ decode_any({"float_value": 42.5, ...others null}) returns: 42.5             │
 │ decode_any({"string_value": "active", ...others null}) returns: "active"    │
@@ -67,16 +67,16 @@ Store as a struct with ONE field populated, others null:
 TYPE MAPPING:
 ────────────────────────────────────────────────────────────────────────────────
 
-Python type      → Struct field
+Python type      -> Struct field
 ──────────────────────────────────
-None             → null_value: True
-bool             → bool_value (CHECK BEFORE int!)
-int              → int_value
-float            → float_value
-str              → string_value
-datetime         → datetime_value
-ObjectId         → objectid_value (as string)
-other            → string_value (JSON serialized)
+None             -> null_value: True
+bool             -> bool_value (CHECK BEFORE int!)
+int              -> int_value
+float            -> float_value
+str              -> string_value
+datetime         -> datetime_value
+ObjectId         -> objectid_value (as string)
+other            -> string_value (JSON serialized)
 
 NOTE: bool must be checked BEFORE int because isinstance(True, int) is True!
 
@@ -121,14 +121,14 @@ class ValueEncoder:
         Encode a polymorphic value to union struct.
 
         Maps Python types to appropriate struct fields:
-        - None → null_value: True
-        - bool → bool_value
-        - int → int_value
-        - float → float_value
-        - str → string_value
-        - datetime → datetime_value
-        - ObjectId → objectid_value (as string)
-        - other → string_value (JSON serialized)
+        - None -> null_value: True
+        - bool -> bool_value
+        - int -> int_value
+        - float -> float_value
+        - str -> string_value
+        - datetime -> datetime_value
+        - ObjectId -> objectid_value (as string)
+        - other -> string_value (JSON serialized)
 
         Args:
             value: Python value to encode

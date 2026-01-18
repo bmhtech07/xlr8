@@ -570,7 +570,7 @@ class TestMergeOptimizationSuccess:
     """
 
     def test_identical_filters_overlapping_time(self, time_field):
-        """Overlapping time ranges with identical filters → merge."""
+        """Overlapping time ranges with identical filters -> merge."""
         t_start = datetime(2024, 1, 1, tzinfo=timezone.utc)
         t_mid = datetime(2024, 3, 1, tzinfo=timezone.utc)
         t_end = datetime(2024, 6, 1, tzinfo=timezone.utc)
@@ -599,7 +599,7 @@ class TestMergeOptimizationSuccess:
         assert brackets[0].timerange.hi == t_end
 
     def test_identical_filters_adjacent_time(self, time_field):
-        """Adjacent time ranges (no gap) → merge."""
+        """Adjacent time ranges (no gap) -> merge."""
         t1 = datetime(2024, 1, 1, tzinfo=timezone.utc)
         t2 = datetime(2024, 2, 1, tzinfo=timezone.utc)
         t3 = datetime(2024, 3, 1, tzinfo=timezone.utc)
@@ -618,7 +618,7 @@ class TestMergeOptimizationSuccess:
         assert brackets[0].timerange.hi == t3
 
     def test_identical_filters_contained_time(self, time_field):
-        """One range contains another → merge to outer range."""
+        """One range contains another -> merge to outer range."""
         t_outer_start = datetime(2024, 1, 1, tzinfo=timezone.utc)
         t_inner_start = datetime(2024, 2, 1, tzinfo=timezone.utc)
         t_inner_end = datetime(2024, 5, 1, tzinfo=timezone.utc)
@@ -646,7 +646,7 @@ class TestMergeOptimizationSuccess:
         assert brackets[0].timerange.hi == t_outer_end
 
     def test_three_branches_filling_gap(self, time_field):
-        """Three branches where middle one fills potential gap → merge."""
+        """Three branches where middle one fills potential gap -> merge."""
         t1 = datetime(2024, 1, 1, tzinfo=timezone.utc)
         t2 = datetime(2024, 3, 1, tzinfo=timezone.utc)
         t3 = datetime(2024, 4, 1, tzinfo=timezone.utc)
@@ -675,7 +675,7 @@ class TestMergeOptimizationBlocked:
     """Test cases where merge is BLOCKED and falls back to $or preservation."""
 
     def test_disjoint_time_gap_not_merged(self, time_field):
-        """Gap between time ranges → cannot merge (would include unwanted data)."""
+        """Gap between time ranges -> cannot merge (would include unwanted data)."""
         t1_start = datetime(2024, 1, 1, tzinfo=timezone.utc)
         t1_end = datetime(2024, 1, 15, tzinfo=timezone.utc)
         t2_start = datetime(2024, 2, 1, tzinfo=timezone.utc)  # 17-day gap!
@@ -702,7 +702,7 @@ class TestMergeOptimizationBlocked:
         assert "$or" in brackets[0].static_filter  # $or preserved
 
     def test_different_static_filters_not_merged(self, time_field, t1, t2):
-        """Different static filters → cannot merge."""
+        """Different static filters -> cannot merge."""
         query = {
             "$or": [
                 {
@@ -724,7 +724,7 @@ class TestMergeOptimizationBlocked:
         assert "$or" in brackets[0].static_filter
 
     def test_partial_time_range_not_merged(self, time_field, t1, t2):
-        """Partial time range (only $gte) → SINGLE mode
+        """Partial time range (only $gte) -> SINGLE mode
         (valid but not parallelizable).
         """
         query = {
@@ -745,7 +745,7 @@ class TestMergeOptimizationBlocked:
         assert "unbounded" in reason.lower() or "partial" in reason.lower()
 
     def test_unbounded_branch_not_merged(self, time_field, t1, t2):
-        """Branch with no time constraint → SINGLE mode
+        """Branch with no time constraint -> SINGLE mode
         (valid but not parallelizable).
         """
         query = {
@@ -1399,86 +1399,87 @@ class TestBuildBracketsThreeTier:
 # documents at exact boundary timestamps to be missed.
 # =============================================================================
 
+
 class TestBoundaryOperatorExtraction:
     """Test that extract_time_bounds_recursive correctly tracks boundary operators."""
-    
+
     def test_gte_lt_default_operators(self):
         """$gte (inclusive) and $lt (exclusive) - the most common case."""
         from src.xlr8.analysis.inspector import extract_time_bounds_recursive
-        
+
         t1 = datetime(2024, 1, 1, tzinfo=timezone.utc)
         t2 = datetime(2024, 2, 1, tzinfo=timezone.utc)
-        
+
         query = {"recordedAt": {"$gte": t1, "$lt": t2}}
         bounds, has_ref = extract_time_bounds_recursive(query, "recordedAt")
-        
+
         assert bounds is not None
         lo, hi, hi_inclusive, lo_inclusive = bounds
         assert lo == t1
         assert hi == t2
-        assert lo_inclusive is True   # $gte is inclusive
+        assert lo_inclusive is True  # $gte is inclusive
         assert hi_inclusive is False  # $lt is exclusive
-        
+
     def test_gte_lte_both_inclusive(self):
         """$gte and $lte - both boundaries included."""
         from src.xlr8.analysis.inspector import extract_time_bounds_recursive
-        
+
         t1 = datetime(2024, 1, 1, tzinfo=timezone.utc)
         t2 = datetime(2024, 2, 1, tzinfo=timezone.utc)
-        
+
         query = {"recordedAt": {"$gte": t1, "$lte": t2}}
         bounds, has_ref = extract_time_bounds_recursive(query, "recordedAt")
-        
+
         assert bounds is not None
         lo, hi, hi_inclusive, lo_inclusive = bounds
         assert lo == t1
         assert hi == t2
-        assert lo_inclusive is True   # $gte is inclusive
-        assert hi_inclusive is True   # $lte is inclusive
-        
+        assert lo_inclusive is True  # $gte is inclusive
+        assert hi_inclusive is True  # $lte is inclusive
+
     def test_gt_lt_both_exclusive(self):
         """$gt and $lt - both boundaries excluded."""
         from src.xlr8.analysis.inspector import extract_time_bounds_recursive
-        
+
         t1 = datetime(2024, 1, 1, tzinfo=timezone.utc)
         t2 = datetime(2024, 2, 1, tzinfo=timezone.utc)
-        
+
         query = {"recordedAt": {"$gt": t1, "$lt": t2}}
         bounds, has_ref = extract_time_bounds_recursive(query, "recordedAt")
-        
+
         assert bounds is not None
         lo, hi, hi_inclusive, lo_inclusive = bounds
         assert lo == t1
         assert hi == t2
         assert lo_inclusive is False  # $gt is exclusive
         assert hi_inclusive is False  # $lt is exclusive
-        
+
     def test_gt_lte_mixed_operators(self):
         """$gt (exclusive) and $lte (inclusive) - mixed boundaries."""
         from src.xlr8.analysis.inspector import extract_time_bounds_recursive
-        
+
         t1 = datetime(2024, 1, 1, tzinfo=timezone.utc)
         t2 = datetime(2024, 2, 1, tzinfo=timezone.utc)
-        
+
         query = {"recordedAt": {"$gt": t1, "$lte": t2}}
         bounds, has_ref = extract_time_bounds_recursive(query, "recordedAt")
-        
+
         assert bounds is not None
         lo, hi, hi_inclusive, lo_inclusive = bounds
         assert lo == t1
         assert hi == t2
         assert lo_inclusive is False  # $gt is exclusive
-        assert hi_inclusive is True   # $lte is inclusive
-        
+        assert hi_inclusive is True  # $lte is inclusive
+
     def test_equality_is_both_inclusive(self):
         """Direct equality should be inclusive on both ends."""
         from src.xlr8.analysis.inspector import extract_time_bounds_recursive
-        
+
         t1 = datetime(2024, 1, 15, tzinfo=timezone.utc)
-        
+
         query = {"recordedAt": t1}
         bounds, has_ref = extract_time_bounds_recursive(query, "recordedAt")
-        
+
         assert bounds is not None
         lo, hi, hi_inclusive, lo_inclusive = bounds
         assert lo == hi == t1
@@ -1488,66 +1489,57 @@ class TestBoundaryOperatorExtraction:
 
 class TestBracketBoundaryPreservation:
     """Test that brackets preserve the original query's boundary operators."""
-    
+
     def test_bracket_preserves_lte(self):
         """Bracket should preserve $lte from original query."""
         t1 = datetime(2024, 1, 1, tzinfo=timezone.utc)
         t2 = datetime(2024, 1, 31, tzinfo=timezone.utc)
-        
-        query = {
-            "sensor_id": "sensor_1",
-            "timestamp": {"$gte": t1, "$lte": t2}
-        }
-        
+
+        query = {"sensor_id": "sensor_1", "timestamp": {"$gte": t1, "$lte": t2}}
+
         is_chunkable, reason, brackets, bounds = build_brackets_for_find(
             query, "timestamp"
         )
-        
+
         assert is_chunkable is True
         assert len(brackets) == 1
-        
+
         bracket = brackets[0]
-        assert bracket.timerange.hi_inclusive is True   # Preserves $lte
-        assert bracket.timerange.lo_inclusive is True   # Default $gte
-            
+        assert bracket.timerange.hi_inclusive is True  # Preserves $lte
+        assert bracket.timerange.lo_inclusive is True  # Default $gte
+
     def test_bracket_preserves_lt(self):
         """Bracket should preserve $lt from original query."""
         t1 = datetime(2024, 1, 1, tzinfo=timezone.utc)
         t2 = datetime(2024, 1, 31, tzinfo=timezone.utc)
-        
-        query = {
-            "sensor_id": "sensor_1",
-            "timestamp": {"$gte": t1, "$lt": t2}
-        }
-        
+
+        query = {"sensor_id": "sensor_1", "timestamp": {"$gte": t1, "$lt": t2}}
+
         is_chunkable, reason, brackets, bounds = build_brackets_for_find(
             query, "timestamp"
         )
-        
+
         assert is_chunkable is True
         assert len(brackets) == 1
-        
+
         bracket = brackets[0]
         assert bracket.timerange.hi_inclusive is False  # Preserves $lt
-        assert bracket.timerange.lo_inclusive is True   # Default $gte
-            
+        assert bracket.timerange.lo_inclusive is True  # Default $gte
+
     def test_bracket_preserves_gt(self):
         """Bracket should preserve $gt from original query."""
         t1 = datetime(2024, 1, 1, tzinfo=timezone.utc)
         t2 = datetime(2024, 1, 31, tzinfo=timezone.utc)
-        
-        query = {
-            "sensor_id": "sensor_1",
-            "timestamp": {"$gt": t1, "$lt": t2}
-        }
-        
+
+        query = {"sensor_id": "sensor_1", "timestamp": {"$gt": t1, "$lt": t2}}
+
         is_chunkable, reason, brackets, bounds = build_brackets_for_find(
             query, "timestamp"
         )
-        
+
         assert is_chunkable is True
         assert len(brackets) == 1
-        
+
         bracket = brackets[0]
         assert bracket.timerange.lo_inclusive is False  # Preserves $gt
         assert bracket.timerange.hi_inclusive is False  # Default $lt
@@ -1555,26 +1547,26 @@ class TestBracketBoundaryPreservation:
 
 class TestBoundaryIntersection:
     """Test that bound intersections handle inclusivity correctly."""
-    
+
     def test_intersection_uses_most_restrictive(self):
         """$and with overlapping bounds should use most restrictive operators."""
         from src.xlr8.analysis.inspector import extract_time_bounds_recursive
-        
+
         t1 = datetime(2024, 1, 1, tzinfo=timezone.utc)
         t2 = datetime(2024, 1, 31, tzinfo=timezone.utc)
         t_mid_lo = datetime(2024, 1, 10, tzinfo=timezone.utc)
         t_mid_hi = datetime(2024, 1, 20, tzinfo=timezone.utc)
-        
+
         # Outer range uses inclusive bounds, inner uses exclusive
         query = {
             "$and": [
-                {"recordedAt": {"$gte": t1, "$lte": t2}},      # Inclusive
-                {"recordedAt": {"$gt": t_mid_lo, "$lt": t_mid_hi}}  # Exclusive
+                {"recordedAt": {"$gte": t1, "$lte": t2}},  # Inclusive
+                {"recordedAt": {"$gt": t_mid_lo, "$lt": t_mid_hi}},  # Exclusive
             ]
         }
-        
+
         bounds, has_ref = extract_time_bounds_recursive(query, "recordedAt")
-        
+
         assert bounds is not None
         lo, hi, hi_inclusive, lo_inclusive = bounds
         # Should take the tighter inner bounds
@@ -1587,24 +1579,24 @@ class TestBoundaryIntersection:
 
 class TestBoundaryUnion:
     """Test that bound unions handle inclusivity correctly."""
-    
+
     def test_or_union_preserves_inclusive_if_any(self):
-        """$or with different end operators should use inclusive if any branch uses it."""
+        """$or with different end operators uses inclusive if any branch uses it."""
         from src.xlr8.analysis.inspector import extract_time_bounds_recursive
-        
+
         t1 = datetime(2024, 1, 1, tzinfo=timezone.utc)
         t2 = datetime(2024, 1, 31, tzinfo=timezone.utc)
-        
+
         # Branch A uses $lt (exclusive), Branch B uses $lte (inclusive)
         query = {
             "$or": [
                 {"sensor": "A", "recordedAt": {"$gte": t1, "$lt": t2}},
-                {"sensor": "B", "recordedAt": {"$gte": t1, "$lte": t2}}
+                {"sensor": "B", "recordedAt": {"$gte": t1, "$lte": t2}},
             ]
         }
-        
+
         bounds, has_ref = extract_time_bounds_recursive(query, "recordedAt")
-        
+
         assert bounds is not None
         lo, hi, hi_inclusive, lo_inclusive = bounds
         assert lo == t1
@@ -1615,30 +1607,32 @@ class TestBoundaryUnion:
 
 class TestTimeRangeBoundaryDefaults:
     """Test that TimeRange has correct default values for boundary operators."""
-    
+
     def test_timerange_default_values(self):
         """TimeRange should default to $gte (inclusive lo) and $lt (exclusive hi)."""
         t1 = datetime(2024, 1, 1, tzinfo=timezone.utc)
         t2 = datetime(2024, 2, 1, tzinfo=timezone.utc)
-        
+
         from src.xlr8.analysis.brackets import TimeRange
-        
+
         # Create with minimal args
         tr = TimeRange(lo=t1, hi=t2, is_full=True)
-        
+
         # Check defaults match common MongoDB pattern
-        assert tr.lo_inclusive is True   # $gte
+        assert tr.lo_inclusive is True  # $gte
         assert tr.hi_inclusive is False  # $lt
-        
+
     def test_timerange_explicit_values(self):
         """TimeRange should accept explicit boundary operator settings."""
         t1 = datetime(2024, 1, 1, tzinfo=timezone.utc)
         t2 = datetime(2024, 2, 1, tzinfo=timezone.utc)
-        
+
         from src.xlr8.analysis.brackets import TimeRange
-        
+
         # Create with explicit inclusive bounds
-        tr = TimeRange(lo=t1, hi=t2, is_full=True, hi_inclusive=True, lo_inclusive=False)
-        
+        tr = TimeRange(
+            lo=t1, hi=t2, is_full=True, hi_inclusive=True, lo_inclusive=False
+        )
+
         assert tr.lo_inclusive is False  # $gt
-        assert tr.hi_inclusive is True   # $lte
+        assert tr.hi_inclusive is True  # $lte

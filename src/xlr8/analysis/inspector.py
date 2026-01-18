@@ -226,7 +226,7 @@ Common reasons by mode:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
@@ -1003,7 +1003,7 @@ def extract_time_bounds_recursive(
         Tuple of (time_bounds, has_time_ref)
         - time_bounds: (lo, hi, hi_inclusive, lo_inclusive) or None
             - lo: Lower bound datetime
-            - hi: Upper bound datetime  
+            - hi: Upper bound datetime
             - hi_inclusive: True if original query used $lte, False if $lt
             - lo_inclusive: True if original query used $gte, False if $gt
         - has_time_ref: True if query references time field anywhere
@@ -1041,7 +1041,8 @@ def extract_time_bounds_recursive(
                         lo = dt
                         lo_inclusive = False
                     elif dt == lo:
-                        lo_inclusive = False  # $gt is more restrictive than $gte at same value
+                        # $gt is more restrictive than $gte at same value
+                        lo_inclusive = False
             elif op == "$lt":
                 new_hi = normalize_datetime(operand)
                 # Take most restrictive upper bound
@@ -1095,7 +1096,7 @@ def extract_time_bounds_recursive(
         """Intersect two bounds, taking most restrictive operators."""
         lo1, hi1, hi_inc1, lo_inc1 = b1
         lo2, hi2, hi_inc2, lo_inc2 = b2
-        
+
         # Take max lower bound
         if lo1 > lo2:
             lo = lo1
@@ -1106,8 +1107,8 @@ def extract_time_bounds_recursive(
         else:  # lo1 == lo2
             lo = lo1
             lo_inclusive = lo_inc1 and lo_inc2  # Both must be inclusive
-        
-        # Take min upper bound  
+
+        # Take min upper bound
         if hi1 < hi2:
             hi = hi1
             hi_inclusive = hi_inc1
@@ -1194,7 +1195,7 @@ def extract_time_bounds_recursive(
         # For inclusivity: preserve inclusive if ANY branch uses it at the boundary
         min_lo = min(b[0] for b in all_bounds)
         max_hi = max(b[1] for b in all_bounds)
-        
+
         # hi_inclusive is True if ANY branch with max_hi uses $lte
         hi_inclusive = any(b[2] for b in all_bounds if b[1] == max_hi)
         # lo_inclusive is True if ANY branch with min_lo uses $gte
@@ -1442,7 +1443,8 @@ def is_chunkable_query(
         time_bounds, has_time_ref = extract_time_bounds_recursive(
             normalized, time_field
         )
-        lo, hi, hi_inclusive, lo_inclusive = time_bounds if time_bounds else (None, None, False, True)
+        defaults = (None, None, False, True)
+        lo, hi, hi_inclusive, lo_inclusive = time_bounds or defaults
 
         return ChunkabilityResult(
             mode=ChunkabilityMode.SINGLE,
@@ -1469,7 +1471,7 @@ def is_chunkable_query(
         time_bounds, has_time_ref = extract_time_bounds_recursive(
             normalized, time_field
         )
-        lo, hi, hi_inclusive, lo_inclusive = time_bounds if time_bounds else (None, None, False, True)
+        lo, hi, hi_inclusive, lo_inclusive = time_bounds or defaults
 
         return ChunkabilityResult(
             mode=ChunkabilityMode.SINGLE,
@@ -1484,7 +1486,7 @@ def is_chunkable_query(
         time_bounds, has_time_ref = extract_time_bounds_recursive(
             normalized, time_field
         )
-        lo, hi, hi_inclusive, lo_inclusive = time_bounds if time_bounds else (None, None, False, True)
+        lo, hi, hi_inclusive, lo_inclusive = time_bounds or defaults
 
         return ChunkabilityResult(
             mode=ChunkabilityMode.SINGLE,
@@ -1499,7 +1501,7 @@ def is_chunkable_query(
         time_bounds, has_time_ref = extract_time_bounds_recursive(
             normalized, time_field
         )
-        lo, hi, hi_inclusive, lo_inclusive = time_bounds if time_bounds else (None, None, False, True)
+        lo, hi, hi_inclusive, lo_inclusive = time_bounds or defaults
 
         return ChunkabilityResult(
             mode=ChunkabilityMode.SINGLE, reason=result.reason, bounds=(lo, hi)
@@ -1511,7 +1513,7 @@ def is_chunkable_query(
         time_bounds, has_time_ref = extract_time_bounds_recursive(
             normalized, time_field
         )
-        lo, hi, hi_inclusive, lo_inclusive = time_bounds if time_bounds else (None, None, False, True)
+        lo, hi, hi_inclusive, lo_inclusive = time_bounds or defaults
 
         return ChunkabilityResult(
             mode=ChunkabilityMode.SINGLE,

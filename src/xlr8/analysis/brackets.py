@@ -167,7 +167,7 @@ class TimeRange:
     hi: Optional[datetime]
     is_full: bool
     hi_inclusive: bool = False  # Default to $lt for backward compatibility
-    lo_inclusive: bool = True   # Default to $gte for backward compatibility
+    lo_inclusive: bool = True  # Default to $gte for backward compatibility
 
 
 @dataclass
@@ -402,12 +402,12 @@ def _check_or_branch_safety(
     be executed as a single query to avoid duplicates.
 
     SAFETY RULES:
-    1. If ANY branch has negation operators → UNSAFE (cannot transform)
-    2. If branches have different field sets → UNSAFE (cannot determine overlap)
-    3. If exactly ONE $in field differs → TRANSFORM (subtract overlapping values)
-    4. If multiple $in fields differ → UNSAFE (explosion of combinations)
-    5. If same $in fields with disjoint values → SAFE
-    6. If same equality values → SAFE (same static_filter, handled by grouping)
+    1. If ANY branch has negation operators -> UNSAFE (cannot transform)
+    2. If branches have different field sets -> UNSAFE (cannot determine overlap)
+    3. If exactly ONE $in field differs -> TRANSFORM (subtract overlapping values)
+    4. If multiple $in fields differ -> UNSAFE (explosion of combinations)
+    5. If same $in fields with disjoint values -> SAFE
+    6. If same equality values -> SAFE (same static_filter, handled by grouping)
 
     Args:
         branches: List of $or branch dicts
@@ -518,7 +518,7 @@ def _check_or_branch_safety(
     #   If we remove 2,3 from Branch B, documents with IDs 2,3 in [t0,t1) and (t2,t3]
     #   would be LOST - not covered by either branch!
     #
-    # So if overlapping $in values exist AND time ranges differ → fall back
+    # So if overlapping $in values exist AND time ranges differ -> fall back
     # to single bracket
 
     # Extract time bounds from each branch to check if they're identical
@@ -632,7 +632,9 @@ def _merge_full_ranges(ranges: List[TimeRange]) -> List[TimeRange]:
         return []
 
     rs.sort(key=lambda r: r.lo)  # type: ignore[arg-type]
-    out: List[TimeRange] = [TimeRange(rs[0].lo, rs[0].hi, True, rs[0].hi_inclusive, rs[0].lo_inclusive)]
+    out: List[TimeRange] = [
+        TimeRange(rs[0].lo, rs[0].hi, True, rs[0].hi_inclusive, rs[0].lo_inclusive)
+    ]
     for r in rs[1:]:
         last = out[-1]
         # Type assertions: we filtered for r.lo and r.hi being not None above
@@ -798,16 +800,16 @@ def build_brackets_for_find(
         >>> # ], (datetime(2024,1,1), datetime(2024,7,1)))
 
     Rejection Cases (returns is_chunkable=False):
-        - Empty $or array (invalid MongoDB syntax) → REJECT
-        - Contradictory time bounds (lo >= hi) → REJECT
+        - Empty $or array (invalid MongoDB syntax) -> REJECT
+        - Contradictory time bounds (lo >= hi) -> REJECT
 
     Single-Worker Cases (returns is_chunkable=True, empty brackets):
-        - $natural sort (insertion order) → SINGLE
-        - Forbidden operators ($expr, $text, $near, etc.) → SINGLE
-        - Nested $or (depth > 1) → SINGLE
-        - Time field negation ($ne/$nin/$not/$nor on time field) → SINGLE
-        - Unbounded $or branches → SINGLE
-        - No time field reference → SINGLE
+        - $natural sort (insertion order) -> SINGLE
+        - Forbidden operators ($expr, $text, $near, etc.) -> SINGLE
+        - Nested $or (depth > 1) -> SINGLE
+        - Time field negation ($ne/$nin/$not/$nor on time field) -> SINGLE
+        - Unbounded $or branches -> SINGLE
+        - No time field reference -> SINGLE
 
     Implementation Note - Multiple Time Bounds Extraction:
         This function calls extract_time_bounds_recursive() multiple times in different
@@ -831,17 +833,17 @@ def build_brackets_for_find(
                    they can be merged into a single bracket. Only possible if
                    time ranges are contiguous with no gaps.
            Example: Branch A [Jan 1-15], Branch B [Jan 10-20]
-                   → Merged [Jan 1-20] ✓
+                   -> Merged [Jan 1-20] ✓
                    Branch A [Jan 1-15], Branch B [Jan 20-31]
-                   → Cannot merge (gap!) ✗
+                   -> Cannot merge (gap!) ✗
 
         4. In final bracket creation - Sets TimeRange for each output
            bracket
            Purpose: Each bracket needs its specific time range for chunking.
            Example: {"sensor": "A", ts: [Jan 1-15]}
-                   → Bracket with TimeRange(Jan 1, Jan 15)
+                   -> Bracket with TimeRange(Jan 1, Jan 15)
                    {"sensor": "B", ts: [Feb 1-28]}
-                   → Bracket with TimeRange(Feb 1, Feb 28)
+                   -> Bracket with TimeRange(Feb 1, Feb 28)
 
         Why multiple calls are necessary:
         - is_chunkable_query() returns UNION of time bounds (overall range)
@@ -851,7 +853,7 @@ def build_brackets_for_find(
         - Final brackets need their specific ranges (individual TimeRange objects)
 
         This is NOT redundant - each extraction serves a different purpose in the
-        validation → optimization → construction pipeline.
+        validation -> optimization -> construction pipeline.
     """
 
     # PHASE 0: Validate query using is_chunkable_query
@@ -938,15 +940,15 @@ def build_brackets_for_find(
             #     {filter_A, timestamp: {$gte: Jan 1, $lt: Jan 20}},
             #     {filter_A, timestamp: {$gte: Jan 15, $lt: Feb 1}},
             #   ]
-            #   → Merged: {filter_A, timestamp: {$gte: Jan 1, $lt: Feb 1}}
+            #   -> Merged: {filter_A, timestamp: {$gte: Jan 1, $lt: Feb 1}}
             #
             # Example (NOT mergeable - disjoint with gap):
             #   $or: [
             #     {filter_A, timestamp: {$gte: Jan 1, $lt: Jan 15}},
             #     {filter_A, timestamp: {$gte: Feb 1, $lt: Feb 15}},
             #   ]
-            #   → Cannot merge! Gap from Jan 15 to Feb 1 would include unwanted data.
-            #   → Fall back to single bracket with full $or query.
+            #   -> Cannot merge! Gap from Jan 15 to Feb 1 would include unwanted data.
+            #   -> Fall back to single bracket with full $or query.
 
             # Extract static filters (without time) from each branch
             static_filters = []
@@ -958,7 +960,12 @@ def build_brackets_for_find(
                 combined = {**global_and, **branch}
                 bounds, _ = extract_time_bounds_recursive(combined, time_field)
                 if bounds is None:
-                    branch_lo, branch_hi, branch_hi_inc, branch_lo_inc = None, None, False, True
+                    branch_lo, branch_hi, branch_hi_inc, branch_lo_inc = (
+                        None,
+                        None,
+                        False,
+                        True,
+                    )
                 else:
                     branch_lo, branch_hi, branch_hi_inc, branch_lo_inc = bounds
 
@@ -969,7 +976,9 @@ def build_brackets_for_find(
                 elif branch_lo is None or branch_hi is None:
                     has_partial_branch = True
 
-                time_bounds_list.append((branch_lo, branch_hi, branch_hi_inc, branch_lo_inc))
+                time_bounds_list.append(
+                    (branch_lo, branch_hi, branch_hi_inc, branch_lo_inc)
+                )
 
                 # Extract static filter (without time)
                 static_wo_time = dict(combined)
@@ -1001,7 +1010,10 @@ def build_brackets_for_find(
                 #
                 # Algorithm: Sort by start time, then verify each range starts
                 # at or before the previous range's end (overlap or adjacent)
-                full_ranges = [(lo, hi, hi_inc, lo_inc) for lo, hi, hi_inc, lo_inc in time_bounds_list]
+                full_ranges = [
+                    (lo, hi, hi_inc, lo_inc)
+                    for lo, hi, hi_inc, lo_inc in time_bounds_list
+                ]
                 sorted_ranges = sorted(full_ranges, key=lambda r: r[0])
 
                 # Start with first range
@@ -1039,7 +1051,13 @@ def build_brackets_for_find(
                     [
                         Bracket(
                             static_filter=static_filters[0],
-                            timerange=TimeRange(merged_lo, merged_hi, True, merged_hi_inclusive, merged_lo_inclusive),
+                            timerange=TimeRange(
+                                merged_lo,
+                                merged_hi,
+                                True,
+                                merged_hi_inclusive,
+                                merged_lo_inclusive,
+                            ),
                         )
                     ],
                     (merged_lo, merged_hi),
@@ -1081,7 +1099,9 @@ def build_brackets_for_find(
                 [
                     Bracket(
                         static_filter=single_filter,
-                        timerange=TimeRange(lo, hi, is_full, hi_inclusive, lo_inclusive),
+                        timerange=TimeRange(
+                            lo, hi, is_full, hi_inclusive, lo_inclusive
+                        ),
                     )
                 ],
                 (lo, hi),
@@ -1116,7 +1136,10 @@ def build_brackets_for_find(
             return False, "nested-or-in-branch", [], (None, None)
 
         prelim.append(
-            Bracket(static_filter=static_wo_time, timerange=TimeRange(lo, hi, is_full, hi_inclusive, lo_inclusive))
+            Bracket(
+                static_filter=static_wo_time,
+                timerange=TimeRange(lo, hi, is_full, hi_inclusive, lo_inclusive),
+            )
         )
 
     grouped: Dict[str, Dict[str, Any]] = {}
@@ -1145,7 +1168,10 @@ def build_brackets_for_find(
         if has_unbounded:
             # Unbounded covers everything - just emit the unbounded bracket
             out_brackets.append(
-                Bracket(static_filter=static, timerange=TimeRange(None, None, False, False, True))
+                Bracket(
+                    static_filter=static,
+                    timerange=TimeRange(None, None, False, False, True),
+                )
             )
             continue  # Skip all full and other partial for this static_filter
 

@@ -114,9 +114,9 @@ def _timedelta_to_duckdb_interval(td: timedelta) -> str:
     Convert Python timedelta to DuckDB interval string.
 
     Examples:
-        timedelta(days=7) → "7 days"
-        timedelta(hours=16) → "16 hours"
-        timedelta(minutes=30) → "30 minutes"
+        timedelta(days=7) -> "7 days"
+        timedelta(hours=16) -> "16 hours"
+        timedelta(minutes=30) -> "30 minutes"
     """
     total_seconds = int(td.total_seconds())
 

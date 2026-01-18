@@ -654,7 +654,7 @@ class ParquetReader:
             df = combined_table.to_pandas()
 
             # Add back Any columns with decoded values
-            # (bypassing struct→dict→decode path)
+            # (bypassing struct->dict->decode path)
             for field_name, decoded_values in any_columns_decoded.items():
                 df[field_name] = decoded_values
 

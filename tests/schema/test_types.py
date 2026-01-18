@@ -8,9 +8,11 @@ Tests all primitive and complex types including:
 - Type equality and hashing
 """
 
-import pytest
 import pyarrow as pa
+import pytest
+
 from xlr8.schema import types as Types
+
 
 class TestPrimitiveTypes:
     """Tests for primitive type definitions."""
@@ -96,7 +98,7 @@ class TestTimestampType:
         ts2 = Types.Timestamp("ms", tz="UTC")
         ts3 = Types.Timestamp("ns", tz="UTC")
         ts4 = Types.Timestamp("ms", tz="America/New_York")
-        
+
         assert ts1 == ts2
         assert ts1 != ts3  # Different unit
         assert ts1 != ts4  # Different timezone
@@ -113,12 +115,10 @@ class TestStructType:
 
     def test_struct_simple(self):
         """Test Struct with simple fields."""
-        struct_type = Types.Struct({
-            "name": Types.String(),
-            "age": Types.Int(),
-            "active": Types.Bool()
-        })
-        
+        struct_type = Types.Struct(
+            {"name": Types.String(), "age": Types.Int(), "active": Types.Bool()}
+        )
+
         arrow_type = struct_type.to_arrow()
         assert pa.types.is_struct(arrow_type)
         assert len(arrow_type) == 3
@@ -128,14 +128,13 @@ class TestStructType:
 
     def test_struct_nested(self):
         """Test Struct with nested Struct."""
-        struct_type = Types.Struct({
-            "user": Types.Struct({
-                "id": Types.Int(),
-                "email": Types.String()
-            }),
-            "timestamp": Types.Timestamp("ms", tz="UTC")
-        })
-        
+        struct_type = Types.Struct(
+            {
+                "user": Types.Struct({"id": Types.Int(), "email": Types.String()}),
+                "timestamp": Types.Timestamp("ms", tz="UTC"),
+            }
+        )
+
         arrow_type = struct_type.to_arrow()
         assert pa.types.is_struct(arrow_type)
         assert pa.types.is_struct(arrow_type.field("user").type)
@@ -145,7 +144,7 @@ class TestStructType:
         s1 = Types.Struct({"x": Types.Int(), "y": Types.Float()})
         s2 = Types.Struct({"x": Types.Int(), "y": Types.Float()})
         s3 = Types.Struct({"x": Types.Int()})
-        
+
         assert s1 == s2
         assert s1 != s3
 
@@ -177,10 +176,7 @@ class TestListType:
     def test_list_of_structs(self):
         """Test List of Struct (array of objects)."""
         list_type = Types.List(
-            Types.Struct({
-                "id": Types.Int(),
-                "name": Types.String()
-            })
+            Types.Struct({"id": Types.Int(), "name": Types.String()})
         )
         arrow_type = list_type.to_arrow()
         assert pa.types.is_list(arrow_type)
@@ -199,7 +195,7 @@ class TestListType:
         l1 = Types.List(Types.String())
         l2 = Types.List(Types.String())
         l3 = Types.List(Types.Int())
-        
+
         assert l1 == l2
         assert l1 != l3
 
@@ -211,7 +207,7 @@ class TestAnyType:
         """Test Any type Arrow conversion to Struct."""
         any_type = Types.Any()
         arrow_type = any_type.to_arrow()
-        
+
         assert pa.types.is_struct(arrow_type)
         # Should have fields for different value types
         field_names = [arrow_type.field(i).name for i in range(len(arrow_type))]
@@ -242,7 +238,7 @@ class TestTypeHashing:
             Types.String(): "string",
             Types.Int(): "int",
             Types.Float(): "float",
-            Types.Bool(): "bool"
+            Types.Bool(): "bool",
         }
         assert type_dict[Types.String()] == "string"
         assert type_dict[Types.Int()] == "int"
@@ -251,7 +247,7 @@ class TestTypeHashing:
         """Test that Timestamp can be used as dict keys."""
         type_dict = {
             Types.Timestamp("ms", tz="UTC"): "ms_utc",
-            Types.Timestamp("ns", tz="UTC"): "ns_utc"
+            Types.Timestamp("ns", tz="UTC"): "ns_utc",
         }
         assert type_dict[Types.Timestamp("ms", tz="UTC")] == "ms_utc"
 
@@ -276,9 +272,9 @@ class TestTypeInheritance:
             Types.ObjectId(),
             Types.Any(),
             Types.Struct({}),
-            Types.List(Types.String())
+            Types.List(Types.String()),
         ]
-        
+
         for t in types_to_test:
             assert isinstance(t, Types.BaseType)
 
@@ -293,11 +289,11 @@ class TestTypeInheritance:
             Types.ObjectId(),
             Types.Any(),
             Types.Struct({}),
-            Types.List(Types.String())
+            Types.List(Types.String()),
         ]
-        
+
         for t in types_to_test:
-            assert hasattr(t, 'to_arrow')
+            assert hasattr(t, "to_arrow")
             assert callable(t.to_arrow)
             # Should return PyArrow DataType
             arrow_type = t.to_arrow()
