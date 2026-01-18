@@ -39,10 +39,10 @@ class TestBackendConfig:
     def test_configs_are_immutable(self):
         """Configs should be immutable (frozen dataclass)."""
         with pytest.raises(AttributeError):
-            RUST_CONFIG.baseline_mb = 100  # type: ignore
+            RUST_CONFIG.baseline_mb = 100
 
         with pytest.raises(AttributeError):
-            PYTHON_CONFIG.baseline_mb = 200  # type: ignore
+            PYTHON_CONFIG.baseline_mb = 200
 
 
 class TestCalculateFlushTrigger:
