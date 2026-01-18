@@ -63,15 +63,15 @@ EXAMPLE DATA TRANSFORMATIONS:
    ]
 
 3. AFTER CHUNKING (for each bracket):
-   Bracket 1 → 13 chunks (14 days each for 6 months)
-   Bracket 2 → 13 chunks
+   Bracket 1 -> 13 chunks (14 days each for 6 months)
+   Bracket 2 -> 13 chunks
    Total: 26 work items in queue
 
 4. PARALLEL FETCH (10 workers):
-   Worker 0: Chunk 1 → 45,000 docs, write to part_0000.parquet
-   Worker 1: Chunk 2 → 52,000 docs, write to part_0001.parquet
+   Worker 0: Chunk 1 -> 45,000 docs, write to part_0000.parquet
+   Worker 1: Chunk 2 -> 52,000 docs, write to part_0001.parquet
    ...
-   Worker 9: Chunk 10 → 38,000 docs, write to part_0009.parquet
+   Worker 9: Chunk 10 -> 38,000 docs, write to part_0009.parquet
    (Rust async workers pull chunks as they finish)
 
 5. OUTPUT (DataFrame):
@@ -455,8 +455,8 @@ class XLR8Cursor:
         │ }                                                                   │
         │                                                                     │
         │ DECISION STEPS:                                                     │
-        │ 1. Check if schema exists         → No: raise error (schema required)│
-        │ 2. Check if query is chunkable    → No: single-worker, still Parquet│
+        │ 1. Check if schema exists         -> No: raise error (schema required)│
+        │ 2. Check if query is chunkable    -> No: single-worker, still Parquet│
         │    (is_chunkable_query checks for time bounds, forbidden ops)       │
         │ 3. If chunkable: use parallel workers based on time span            │
         │                                                                     │
@@ -987,14 +987,14 @@ class XLR8Cursor:
         │                                                                     │
         │ TIME ONLY (partition_by=None):                                      │
         │   partition_time_delta=timedelta(weeks=1)                           │
-        │   → 1 callback per week of data                                     │
+        │   -> 1 callback per week of data                                     │
         │                                                                     │
         │ TIME + FIELD (partition_by="metadata.instrument"):                  │
         │   partition_time_delta=timedelta(weeks=1)                           │
-        │   → 1 callback per (week, instrument) combination                   │
+        │   -> 1 callback per (week, instrument) combination                   │
         │                                                                     │
         │ Example: 1 year of data, 10 instruments, weekly partitions          │
-        │   → 52 weeks × 10 instruments = 520 callbacks                       │
+        │   -> 52 weeks × 10 instruments = 520 callbacks                       │
         └─────────────────────────────────────────────────────────────────────┘
 
         The callback receives:
@@ -1777,23 +1777,23 @@ class XLR8Cursor:
         │ 1. CACHE CHECK                                                      │
         │    Input: self._filter hashed to "abc123def"                        │
         │    Check: Does .cache/abc123def/*.parquet exist?                    │
-        │    If yes → Read directly from Parquet (instant!)                   │
+        │    If yes -> Read directly from Parquet (instant!)                   │
         │                                                                     │
-        │ 2. CACHE MISS → PARALLEL FETCH (if chunkable)                       │
+        │ 2. CACHE MISS -> PARALLEL FETCH (if chunkable)                       │
         │    Calls: execute_parallel_stream_to_cache()                        │
         │    Which does:                                                      │
         │    a) Build brackets from query (analysis/brackets.py)              │
-        │       Query → [Bracket(static_filter, time_range), ...]             │
+        │       Query -> [Bracket(static_filter, time_range), ...]             │
         │    b) Plan execution (execution/planner.py)                         │
-        │       Time range + RAM → workers=N, batch_size=M                    │
+        │       Time range + RAM -> workers=N, batch_size=M                    │
         │    c) Chunk time ranges (analysis/chunker.py)                       │
-        │       6 months → X chunks based on granularity                      │
+        │       6 months -> X chunks based on granularity                      │
         │    d) Parallel fetch (Rust backend fetch_chunks_bson)               │
         │       N async workers pull chunks from queue                        │
         │    e) Stream to Parquet (Rust backend)                              │
         │       Each worker writes part files: part_0000.parquet, etc.        │
         │                                                                     │
-        │ 2b. CACHE MISS → SINGLE-WORKER FETCH (if not chunkable)             │
+        │ 2b. CACHE MISS -> SINGLE-WORKER FETCH (if not chunkable)             │
         │    - Single worker fetches all data                                 │
         │    - No async, no chunking                                          │
         │    - Still writes to Parquet for caching                            │
@@ -1831,7 +1831,7 @@ class XLR8Cursor:
 
         # ─────────────────────────────────────────────────────────────────────
         # STEP 1: Create cache manager (hashes query to unique directory)
-        # Example: filter_dict hashes to "abc123def" → .cache/abc123def/
+        # Example: filter_dict hashes to "abc123def" -> .cache/abc123def/
         # ─────────────────────────────────────────────────────────────────────
         cache = CacheManager(
             filter_dict=self._filter,
@@ -1957,7 +1957,7 @@ class XLR8Cursor:
             # chunking_granularity is passed from to_dataframe()
             # If None, execute_parallel_stream_to_cache will use single-worker mode
 
-            # Streaming path: fetch → encode → write Parquet (memory efficient)
+            # Streaming path: fetch -> encode -> write Parquet (memory efficient)
             result = execute_parallel_stream_to_cache(
                 pymongo_collection=self._collection.pymongo_collection,
                 filter_dict=self._filter,
