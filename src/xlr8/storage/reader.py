@@ -1248,3 +1248,15 @@ class ParquetReader:
             "schema_fields": [field.name for field in schema] if schema else [],
             "cache_dir": str(self.cache_dir),
         }
+
+    def __repr__(self) -> str:
+        stats = self.get_statistics()
+        return (
+            f"ParquetReader(files={stats['file_count']}, "
+            f"rows={stats['total_rows']:,}, "
+            f"size={stats['total_size_mb']:.1f}MB)"
+        )
+
+    def __len__(self) -> int:
+        """Return total number of rows across all files."""
+        return self.get_statistics()["total_rows"]

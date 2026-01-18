@@ -19,7 +19,7 @@
 //!   - `arrow_builder`: Arrow RecordBatch construction from BSON documents
 //!   - `parquet_writer`: Parquet file writing with ZSTD compression
 //!   - `utilities`: Helper functions for timestamp ranges and file naming
-//!   - `types`: Timeline tracking and statistics collection
+//!   - `types`: Buffer, schema, and chunk type definitions
 //!
 //! # Performance
 //!

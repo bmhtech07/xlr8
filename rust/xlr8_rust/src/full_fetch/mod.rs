@@ -9,8 +9,8 @@ pub mod arrow_builder;
 
 // Re-export key types for convenience
 pub use types::{
-    BsonChunk, FetchResult, FileStats, MemoryAwareBuffer, 
-    SchemaSpec, SortSpec, StatsCollector, Timeline, TimelineEvent,
+    BsonChunk, FetchResult, MemoryAwareBuffer, 
+    SchemaSpec, SortSpec,
 };
 
 // Re-export functions
@@ -148,10 +148,6 @@ pub fn fetch_chunks_bson(
                 let flush_trigger_mb = Arc::new(flush_trigger_mb);
                 let avg_doc_size_bytes = Arc::new(avg_doc_size_bytes);
                 
-                // Stats collector for all workers
-                let stats_collector = Arc::new(StatsCollector::new());
-                let timeline = Arc::new(Timeline::new());
-                
                 // Parse sort_spec from JSON
                 let sort_spec = parse_sort_spec(sort_spec_json);
                 let sort_spec = Arc::new(sort_spec);
@@ -177,7 +173,7 @@ pub fn fetch_chunks_bson(
                         
                         let mut handles = Vec::with_capacity(num_workers);
                         
-                        for (worker_id, my_chunks) in chunks_per_worker.into_iter().enumerate() {
+                        for (_worker_id, my_chunks) in chunks_per_worker.into_iter().enumerate() {
                             let client = Arc::clone(&client);
                             let schema_spec = Arc::clone(&schema_spec);
                             let db_name = Arc::clone(&db_name);
@@ -187,8 +183,6 @@ pub fn fetch_chunks_bson(
                             let time_field = Arc::clone(&time_field);
                             let flush_trigger_mb = Arc::clone(&flush_trigger_mb);
                             let avg_doc_size_bytes = Arc::clone(&avg_doc_size_bytes);
-                            let stats_collector = Arc::clone(&stats_collector);
-                            let timeline = Arc::clone(&timeline);
                             let projection_cloned = projection.clone();
                             let _chunk_count = my_chunks.len();
                             
@@ -205,8 +199,6 @@ pub fn fetch_chunks_bson(
                                 
                                 // Process ALL my pre-assigned chunks
                                 for bson_chunk in my_chunks {
-                                    timeline.record(worker_id, "query_start");  // MongoDB query begins
-                                    
                                     // Build find options with conditional projection
                                     let find_options = if let Some(ref proj) = projection_cloned {
                                         mongodb::options::FindOptions::builder()
@@ -224,11 +216,7 @@ pub fn fetch_chunks_bson(
                                         Err(_) => continue,
                                     };
                                     
-                                    timeline.record(worker_id, "query_end");  // Cursor ready, streaming begins
-                                    
                                     use futures::stream::StreamExt;
-                                    timeline.record(worker_id, "fetch_start");
-                                    let mut fetch_cycle_docs = 0;  // Track docs in THIS fetch cycle
                                     while let Some(result) = cursor.next().await {
                                         let doc = match result {
                                             Ok(d) => d,
@@ -237,13 +225,10 @@ pub fn fetch_chunks_bson(
                                         
                                         buffer.add(doc);
                                         worker_total_docs += 1;
-                                        fetch_cycle_docs += 1;
                                         
                                         if buffer.should_flush() {
-                                            timeline.record_with_metadata(worker_id, "fetch_end", Some(fetch_cycle_docs), None, None);
                                             let mut docs = buffer.take_docs();
-                                            let doc_count = docs.len();
-                                            let buffer_size_mb = buffer.approx_mb();
+                                            let _doc_count = docs.len();
                                             
                                             // Move CPU/IO work to blocking thread pool
                                             let sort_spec_clone = sort_spec.clone();
@@ -252,11 +237,8 @@ pub fn fetch_chunks_bson(
                                             let schema_spec_clone = schema_spec.clone();
                                             let arrow_schema_clone = arrow_schema.clone();
                                             let file_count = worker_file_count;
-                                            let stats_collector_clone = Arc::clone(&stats_collector);
-                                            let timeline_clone = Arc::clone(&timeline);
                                             
                                             tokio::task::spawn_blocking(move || {
-                                                timeline_clone.record(worker_id, "flush_start");
                                                 // Sort on blocking thread
                                                 if let Some(ref spec) = sort_spec_clone.as_ref() {
                                                     sort_documents(&mut docs, spec);
@@ -274,53 +256,19 @@ pub fn fetch_chunks_bson(
                                                 let batch = build_record_batch(&docs, &schema_spec_clone, &arrow_schema_clone)?;
                                                 write_parquet_file(&batch, &filepath)?;
                                                 
-                                                // Record file stats
-                                                if let (Some(start), Some(end)) = (start_ms, end_ms) {
-                                                    let start_date = chrono::DateTime::from_timestamp_millis(start)
-                                                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                                                        .unwrap_or_else(|| format!("{}ms", start));
-                                                    let end_date = chrono::DateTime::from_timestamp_millis(end)
-                                                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                                                        .unwrap_or_else(|| format!("{}ms", end));
-                                                    let time_span_hours = (end - start) as f64 / (1000.0 * 3600.0);
-                                                    
-                                                    stats_collector_clone.record(FileStats {
-                                                        worker_id,
-                                                        file_number: file_count,
-                                                        doc_count,
-                                                        start_date,
-                                                        end_date,
-                                                        time_span_hours,
-                                                        buffer_size_mb,
-                                                        file_path: filepath.clone(),
-                                                    });
-                                                }
-                                                timeline_clone.record_with_metadata(
-                                                    worker_id, 
-                                                    "flush_end", 
-                                                    Some(doc_count), 
-                                                    start_ms, 
-                                                    end_ms
-                                                );
-                                                
                                                 Ok::<_, PyErr>(())
                                             })
                                             .await
                                             .map_err(|e| PyValueError::new_err(format!("Blocking task error: {e}")))??;
                                             
                                             worker_file_count += 1;
-                                            timeline.record(worker_id, "fetch_start");
-                                            fetch_cycle_docs = 0;  // Reset for new fetch cycle
                                         }
                                     }
-                                    timeline.record_with_metadata(worker_id, "fetch_end", Some(fetch_cycle_docs), None, None);
                                 }
                                 
                                 // Final flush at end
                                 if buffer.len() > 0 {
                                     let mut docs = buffer.take_docs();
-                                    let doc_count = docs.len();
-                                    let buffer_size_mb = buffer.approx_mb();
                                     
                                     // Move CPU/IO work to blocking thread pool
                                     let sort_spec_clone = sort_spec.clone();
@@ -329,7 +277,6 @@ pub fn fetch_chunks_bson(
                                     let schema_spec_clone = schema_spec.clone();
                                     let arrow_schema_clone = arrow_schema.clone();
                                     let file_count = worker_file_count;
-                                    let stats_collector_clone = Arc::clone(&stats_collector);
                                     
                                     tokio::task::spawn_blocking(move || {
                                         // Sort on blocking thread
@@ -348,28 +295,6 @@ pub fn fetch_chunks_bson(
                                         
                                         let batch = build_record_batch(&docs, &schema_spec_clone, &arrow_schema_clone)?;
                                         write_parquet_file(&batch, &filepath)?;
-                                        
-                                        // Record file stats
-                                        if let (Some(start), Some(end)) = (start_ms, end_ms) {
-                                            let start_date = chrono::DateTime::from_timestamp_millis(start)
-                                                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                                                .unwrap_or_else(|| format!("{}ms", start));
-                                            let end_date = chrono::DateTime::from_timestamp_millis(end)
-                                                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                                                .unwrap_or_else(|| format!("{}ms", end));
-                                            let time_span_hours = (end - start) as f64 / (1000.0 * 3600.0);
-                                            
-                                            stats_collector_clone.record(FileStats {
-                                                worker_id,
-                                                file_number: file_count,
-                                                doc_count,
-                                                start_date,
-                                                end_date,
-                                                time_span_hours,
-                                                buffer_size_mb,
-                                                file_path: filepath.clone(),
-                                            });
-                                        }
                                         
                                         Ok::<_, PyErr>(())
                                     })
@@ -400,13 +325,6 @@ pub fn fetch_chunks_bson(
                         }
                         
                         let duration_secs = start.elapsed().as_secs_f64();
-                        
-                        // Write flush stats to JSON file
-                        // let stats_file = stats_collector.write_to_json(&cache_dir).ok();
-                        
-                        // Write timeline to JSON file
-                        // let timeline_path = format!("{}/timeline.json", cache_dir);
-                        // timeline.save_to_file(&timeline_path).ok();
                         
                         Ok::<FetchResult, PyErr>(FetchResult {
                             total_docs,
