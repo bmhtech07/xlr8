@@ -13,6 +13,15 @@ repos:
     hooks:
       - id: nbstripout
 
+  # Version bump enforcement
+  - repo: local
+    hooks:
+      - id: version-bump
+        name: version bump required when package changes
+        entry: python scripts/check_version_bump.py
+        language: system
+        pass_filenames: false
+
   # # pytest - Run tests before commit
   # - repo: local
   #   hooks:
