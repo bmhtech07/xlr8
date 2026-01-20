@@ -57,15 +57,11 @@ jobs:
             echo "Tag $TAG_NAME is new; proceeding.";
           fi
 
-  # Build Linux wheels (x86_64 and aarch64)
-  build-linux:
+  # Build Linux x86_64 wheels
+  build-linux-x86:
     needs: check-version
     if: needs.check-version.outputs.release_needed == 'true'
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [x86_64, aarch64]
 
     steps:
       - name: Checkout
@@ -74,7 +70,7 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
-          target: ${{ matrix.target }}
+          target: x86_64
           command: build
           args: --release --out dist --interpreter python3.11 python3.12 python3.13
           manylinux: auto
@@ -82,7 +78,31 @@ jobs:
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-linux-${{ matrix.target }}
+          name: wheels-linux-x86_64
+          path: dist/*.whl
+
+  # Build Linux aarch64 wheels (native ARM runner to avoid ring cross-compile issues)
+  build-linux-arm:
+    needs: check-version
+    if: needs.check-version.outputs.release_needed == 'true'
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: aarch64
+          command: build
+          args: --release --out dist --interpreter python3.11 python3.12 python3.13
+          manylinux: auto
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-aarch64
           path: dist/*.whl
 
   # Build Windows wheels
@@ -173,7 +193,7 @@ jobs:
 
   # Create release and publish to PyPI
   release:
-    needs: [check-version, build-linux, build-windows, build-macos, build-sdist]
+    needs: [check-version, build-linux-x86, build-linux-arm, build-windows, build-macos, build-sdist]
     if: needs.check-version.outputs.release_needed == 'true'
     runs-on: ubuntu-latest
 
