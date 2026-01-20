@@ -8,8 +8,8 @@ on:
       - "src/xlr8/**"
       - "rust/xlr8_rust/**"
       - "pyproject.toml"
-      - "rust/xlr8_rust/pyproject.toml"
       - "README.md"
+      - "README_PYPI.md"
       - ".github/workflows/release.yml"
   workflow_dispatch:
 
@@ -17,7 +17,8 @@ permissions:
   contents: write
 
 jobs:
-  build-python:
+  # Check version and determine if release is needed
+  check-version:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -35,24 +36,14 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v3
-        with:
-          version: "latest"
-
-      - name: Get versions
+      - name: Get version
         id: version
         run: |
-          PY_VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
-          RUST_VERSION=$(python -c "import tomllib; print(tomllib.load(open('rust/xlr8_rust/pyproject.toml','rb'))['project']['version'])")
-          if [ "$PY_VERSION" != "$RUST_VERSION" ]; then
-            echo "ERROR: Version mismatch: xlr8=$PY_VERSION, xlr8-rust=$RUST_VERSION" >&2
-            exit 1
-          fi
-          TAG_NAME="v$PY_VERSION"
-          echo "version=$PY_VERSION" >> $GITHUB_OUTPUT
+          VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          TAG_NAME="v$VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
-          echo "Version: $PY_VERSION (tag $TAG_NAME)"
+          echo "Version: $VERSION (tag $TAG_NAME)"
 
       - name: Check if tag exists
         id: check_tag
@@ -66,22 +57,10 @@ jobs:
             echo "Tag $TAG_NAME is new; proceeding.";
           fi
 
-      - name: Build xlr8 (python)
-        if: steps.check_tag.outputs.release_needed == 'true'
-        run: |
-          uv build
-          ls -la dist
-
-      - name: Upload python dist
-        if: steps.check_tag.outputs.release_needed == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: dist-python
-          path: dist/*
-
-  build-rust:
-    needs: build-python
-    if: needs.build-python.outputs.release_needed == 'true'
+  # Build wheels for each platform and Python version
+  build-wheels:
+    needs: check-version
+    if: needs.check-version.outputs.release_needed == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -99,25 +78,47 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Build wheels (xlr8-rust)
+      - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
-          working-directory: rust/xlr8_rust
           command: build
           args: --release --out dist
           manylinux: auto
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload rust wheels
+      - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: dist-rust-${{ matrix.os }}-py${{ matrix.python-version }}
-          path: rust/xlr8_rust/dist/*
+          name: wheels-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: dist/*.whl
 
+  # Build source distribution
+  build-sdist:
+    needs: check-version
+    if: needs.check-version.outputs.release_needed == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  # Create release and publish to PyPI
   release:
-    needs: [build-python, build-rust]
-    if: needs.build-python.outputs.release_needed == 'true'
+    needs: [check-version, build-wheels, build-sdist]
+    if: needs.check-version.outputs.release_needed == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -131,23 +132,16 @@ jobs:
         with:
           path: dist_all
 
-      - name: Gather dists
+      - name: Gather all dists
         run: |
-          mkdir -p dist dist-rust dist-python
-          # Separate xlr8-rust wheels from xlr8 package
-          find dist_all -type f -name "xlr8_rust*.whl" -exec cp -v {} dist-rust/ \;
-          find dist_all -type f -name "xlr8-*.whl" -exec cp -v {} dist-python/ \;
-          find dist_all -type f -name "xlr8-*.tar.gz" -exec cp -v {} dist-python/ \;
-          # Combined dist for GitHub Release
-          cp dist-rust/* dist/ 2>/dev/null || true
-          cp dist-python/* dist/ 2>/dev/null || true
-          echo "=== dist-rust ===" && ls -la dist-rust/
-          echo "=== dist-python ===" && ls -la dist-python/
-          echo "=== dist (combined) ===" && ls -la dist/
+          mkdir -p dist
+          find dist_all -type f -name "*.whl" -exec cp -v {} dist/ \;
+          find dist_all -type f -name "*.tar.gz" -exec cp -v {} dist/ \;
+          echo "=== dist ===" && ls -la dist/
 
       - name: Create and push tag
         run: |
-          TAG_NAME="${{ needs.build-python.outputs.tag_name }}"
+          TAG_NAME="${{ needs.check-version.outputs.tag_name }}"
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git tag "$TAG_NAME"
@@ -156,24 +150,17 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.build-python.outputs.tag_name }}
-          name: XLR8 ${{ needs.build-python.outputs.tag_name }}
+          tag_name: ${{ needs.check-version.outputs.tag_name }}
+          name: XLR8 ${{ needs.check-version.outputs.tag_name }}
           files: |
             dist/*.whl
             dist/*.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Publish xlr8-rust to PyPI
+      - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           password: ${{ secrets.XLR8_PYPI_TOKEN }}
-          packages-dir: dist-rust/
-          skip-existing: true
-
-      - name: Publish xlr8 to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          password: ${{ secrets.XLR8_PYPI_TOKEN }}
-          packages-dir: dist-python/
+          packages-dir: dist/
           skip-existing: true

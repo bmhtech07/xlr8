@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
 
 [project]
 name = "xlr8"
-version = "0.1.2"
+version = "0.1.3"
 description = "High-performance database read acceleration layer for MongoDB. Auto-chunks and parallelizes queries across multiple-workers, streams results to parquet with intelligent caching and memory-bounded execution, option to stream data directly to any data lake. Same PyMongo API but dramatically faster results with RUST backend for CPU-heavy tasks."
 readme = "README_PYPI.md"
 requires-python = ">=3.11"
@@ -31,20 +31,16 @@ dependencies = [
     "polars>0.15.1",
     "duckdb>0.6.0",
     "orjson>3.8.1",
-    "xlr8-rust",
     "psutil",
     "python-dotenv",
 ]
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/xlr8"]
-
-
-[tool.uv.sources]
-xlr8-rust = { path = "rust/xlr8_rust" }
-
-[tool.setuptools.package-data]
-xlr8 = ["py.typed", "**/*.pyi"]
+[tool.maturin]
+# Build mixed Python + Rust package
+python-source = "src"
+module-name = "xlr8._xlr8_rust"
+manifest-path = "rust/xlr8_rust/Cargo.toml"
+features = ["pyo3/extension-module"]
 
 [dependency-groups]
 dev = [

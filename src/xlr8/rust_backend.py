@@ -27,16 +27,14 @@ Usage:
     arrow_array = encode_any_values_to_arrow(values)
 """
 
-import _xlr8_rust as _native  # type: ignore[import-not-found]
+from xlr8._xlr8_rust import (  # type: ignore[import-not-found]
+    decode_any_struct_arrow,
+    encode_any_values_to_arrow,
+    fetch_chunks_bson,
+)
 
-# GIL-FREE: BSON-based chunks (Phase 1 integration)
-# Accepts BSON-serialized chunks for proper ObjectId, datetime handling
-fetch_chunks_bson = _native.fetch_chunks_bson
-
-# Fast Arrow-native decoder - takes PyArrow StructArray directly
-# Operates on Arrow memory directly for ~44x speedup vs Python iteration
-decode_any_struct_arrow = _native.decode_any_struct_arrow
-
-# Fast Arrow-native encoder - takes Python list, returns PyArrow StructArray
-# Operates directly in Rust for ~10x speedup vs Python iteration
-encode_any_values_to_arrow = _native.encode_any_values_to_arrow
+__all__ = [
+    "fetch_chunks_bson",
+    "decode_any_struct_arrow",
+    "encode_any_values_to_arrow",
+]

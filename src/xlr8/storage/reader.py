@@ -106,6 +106,40 @@ from xlr8.constants import DEFAULT_BATCH_SIZE
 logger = logging.getLogger(__name__)
 
 
+def _convert_datetime_for_filter(dt: datetime, target_type: pa.DataType) -> datetime:
+    """Convert datetime to match the target Arrow timestamp type.
+
+    Handles timezone-aware vs timezone-naive conversions:
+    - If target has timezone and input doesn't: assume UTC
+    - If target has no timezone and input does: strip timezone
+    - Matching types: return as-is
+
+    Args:
+        dt: Input datetime
+        target_type: PyArrow timestamp type from parquet schema
+
+    Returns:
+        datetime compatible with the target type
+    """
+    if not isinstance(target_type, pa.TimestampType):
+        return dt
+
+    target_has_tz = target_type.tz is not None
+    input_has_tz = dt.tzinfo is not None
+
+    if target_has_tz and not input_has_tz:
+        # Target has tz, input doesn't - assume input is UTC
+        from datetime import timezone
+
+        return dt.replace(tzinfo=timezone.utc)
+    elif not target_has_tz and input_has_tz:
+        # Target has no tz, input does - strip timezone
+        return dt.replace(tzinfo=None)
+    else:
+        # Both match (both have tz or both don't)
+        return dt
+
+
 class ParquetReader:
     """
     Reads Parquet files from cache directory.
@@ -564,16 +598,25 @@ class ParquetReader:
             ... )
         """
         # Build PyArrow filter for date range (predicate pushdown)
-        # Convert datetime to PyArrow timestamp[ms] to match Parquet column type (no tz)
+        # We'll determine the correct timestamp type from the first parquet file
         filters = None
-        if time_field and (start_date or end_date):
+        if time_field and (start_date or end_date) and self.parquet_files:
+            # Get the timestamp type from the parquet schema
+            first_file_schema = pq.read_schema(self.parquet_files[0])
+            field_idx = first_file_schema.get_field_index(time_field)
+            if field_idx >= 0:
+                ts_type = first_file_schema.field(field_idx).type
+            else:
+                # Fallback to ms if field not found
+                ts_type = pa.timestamp("ms")
+
             filter_conditions = []
             if start_date:
-                # Convert to ms timestamp (no tz) to match Parquet storage
-                start_ts = pa.scalar(start_date, type=pa.timestamp("ms"))
+                # Convert datetime to match parquet column type
+                start_ts = pa.scalar(start_date, type=ts_type)
                 filter_conditions.append((time_field, ">=", start_ts))
             if end_date:
-                end_ts = pa.scalar(end_date, type=pa.timestamp("ms"))
+                end_ts = pa.scalar(end_date, type=ts_type)
                 filter_conditions.append((time_field, "<", end_ts))
             if filter_conditions:
                 filters = filter_conditions
@@ -588,20 +631,23 @@ class ParquetReader:
             lf = pl.scan_parquet(self.parquet_files)
 
             # Apply date filter with predicate pushdown (reads only matching data)
-            # Convert datetime to naive (no timezone) to match Parquet column dtype
+            # Convert datetime to match Parquet column dtype (tz-aware or naive)
             if time_field and (start_date or end_date):
+                # Get timestamp type from parquet to handle tz correctly
+                first_file_schema = pq.read_schema(self.parquet_files[0])
+                field_idx = first_file_schema.get_field_index(time_field)
+                ts_type = (
+                    first_file_schema.field(field_idx).type
+                    if field_idx >= 0
+                    else pa.timestamp("ms")
+                )
+
                 if start_date:
-                    start_naive = (
-                        start_date.replace(tzinfo=None)
-                        if start_date.tzinfo
-                        else start_date
-                    )
-                    lf = lf.filter(pl.col(time_field) >= start_naive)
+                    start_converted = _convert_datetime_for_filter(start_date, ts_type)
+                    lf = lf.filter(pl.col(time_field) >= start_converted)
                 if end_date:
-                    end_naive = (
-                        end_date.replace(tzinfo=None) if end_date.tzinfo else end_date
-                    )
-                    lf = lf.filter(pl.col(time_field) < end_naive)
+                    end_converted = _convert_datetime_for_filter(end_date, ts_type)
+                    lf = lf.filter(pl.col(time_field) < end_converted)
 
             # Collect executes the query with predicate pushdown
             df = lf.collect()
@@ -715,6 +761,22 @@ class ParquetReader:
         batch_count = 0
         total_rows = 0
 
+        # Pre-compute converted datetimes for filtering (tz-aware or naive)
+        start_converted = None
+        end_converted = None
+        if time_field and (start_date or end_date) and self.parquet_files:
+            first_file_schema = pq.read_schema(self.parquet_files[0])
+            field_idx = first_file_schema.get_field_index(time_field)
+            ts_type = (
+                first_file_schema.field(field_idx).type
+                if field_idx >= 0
+                else pa.timestamp("ms")
+            )
+            if start_date:
+                start_converted = _convert_datetime_for_filter(start_date, ts_type)
+            if end_date:
+                end_converted = _convert_datetime_for_filter(end_date, ts_type)
+
         for parquet_file in self.parquet_files:
             try:
                 # Open parquet file for batch iteration
@@ -725,13 +787,16 @@ class ParquetReader:
                     batch_df = batch.to_pandas()
 
                     # Apply date filter if specified
-                    # (in case predicate pushdown not supported)
-                    if time_field and (start_date or end_date):
+                    if time_field and (start_converted or end_converted):
                         if time_field in batch_df.columns:
-                            if start_date:
-                                batch_df = batch_df[batch_df[time_field] >= start_date]
-                            if end_date:
-                                batch_df = batch_df[batch_df[time_field] < end_date]
+                            if start_converted:
+                                batch_df = batch_df[
+                                    batch_df[time_field] >= start_converted
+                                ]
+                            if end_converted:
+                                batch_df = batch_df[
+                                    batch_df[time_field] < end_converted
+                                ]
 
                     if len(batch_df) == 0:
                         continue
@@ -895,11 +960,26 @@ class ParquetReader:
                         df[time_field] = df[time_field].dt.tz_localize("UTC")
 
             # Apply date filtering if needed
-            if time_field and (start_date or end_date):
+            # Convert datetimes to match the column's timezone state
+            if time_field and (start_date or end_date) and time_field in df.columns:
+                # After the above, time_field is always tz-aware (UTC)
+                # So we need tz-aware comparisons
+                from datetime import timezone
+
                 if start_date:
-                    df = df[df[time_field] >= start_date]
+                    start_cmp = (
+                        start_date
+                        if start_date.tzinfo
+                        else start_date.replace(tzinfo=timezone.utc)
+                    )
+                    df = df[df[time_field] >= start_cmp]
                 if end_date:
-                    df = df[df[time_field] < end_date]
+                    end_cmp = (
+                        end_date
+                        if end_date.tzinfo
+                        else end_date.replace(tzinfo=timezone.utc)
+                    )
+                    df = df[df[time_field] < end_cmp]
 
             # Process the DataFrame (decode structs, reconstruct ObjectIds)
             df = self._process_dataframe(df, "pandas", schema, coerce)
@@ -1209,11 +1289,24 @@ class ParquetReader:
                             )
 
                 # Apply date filtering if needed
+                # After UTC conversion above, time_field is tz-aware
                 if time_field and (start_date or end_date):
+                    from datetime import timezone
+
                     if start_date:
-                        batch_df = batch_df[batch_df[time_field] >= start_date]
+                        start_cmp = (
+                            start_date
+                            if start_date.tzinfo
+                            else start_date.replace(tzinfo=timezone.utc)
+                        )
+                        batch_df = batch_df[batch_df[time_field] >= start_cmp]
                     if end_date:
-                        batch_df = batch_df[batch_df[time_field] < end_date]
+                        end_cmp = (
+                            end_date
+                            if end_date.tzinfo
+                            else end_date.replace(tzinfo=timezone.utc)
+                        )
+                        batch_df = batch_df[batch_df[time_field] < end_cmp]
                     if len(batch_df) == 0:
                         continue
 

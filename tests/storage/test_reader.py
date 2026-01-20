@@ -176,3 +176,296 @@ class TestStatistics:
         reader = ParquetReader(cache_dir=sample_parquet_cache)
 
         assert len(reader) > 0
+
+
+class TestDatetimeTimezoneHandling:
+    """Test datetime filtering with timezone-aware and timezone-naive datetimes."""
+
+    @pytest.fixture
+    def tz_aware_parquet_cache(self, tmp_path):
+        """Create parquet files with timezone-aware timestamps."""
+        cache_dir = tmp_path / "tz_aware_cache"
+        cache_dir.mkdir()
+
+        df = pd.DataFrame(
+            {
+                "timestamp": pd.to_datetime(
+                    [
+                        "2024-01-15 00:00:00",
+                        "2024-01-15 01:00:00",
+                        "2024-01-15 02:00:00",
+                        "2024-01-15 03:00:00",
+                        "2024-01-15 04:00:00",
+                    ]
+                ).tz_localize("UTC"),
+                "value": [1.0, 2.0, 3.0, 4.0, 5.0],
+                "name": ["a", "b", "c", "d", "e"],
+            }
+        )
+
+        parquet_file = cache_dir / "tz_aware_part_0000.parquet"
+        df.to_parquet(parquet_file, index=False)
+
+        return cache_dir
+
+    @pytest.fixture
+    def tz_naive_parquet_cache(self, tmp_path):
+        """Create parquet files with timezone-naive timestamps."""
+        cache_dir = tmp_path / "tz_naive_cache"
+        cache_dir.mkdir()
+
+        df = pd.DataFrame(
+            {
+                "timestamp": pd.to_datetime(
+                    [
+                        "2024-01-15 00:00:00",
+                        "2024-01-15 01:00:00",
+                        "2024-01-15 02:00:00",
+                        "2024-01-15 03:00:00",
+                        "2024-01-15 04:00:00",
+                    ]
+                ),  # No tz_localize - naive
+                "value": [1.0, 2.0, 3.0, 4.0, 5.0],
+                "name": ["a", "b", "c", "d", "e"],
+            }
+        )
+
+        parquet_file = cache_dir / "tz_naive_part_0000.parquet"
+        df.to_parquet(parquet_file, index=False)
+
+        return cache_dir
+
+    @pytest.fixture
+    def test_schema(self):
+        """Schema for datetime tests."""
+        return Schema(
+            time_field="timestamp",
+            fields={
+                "timestamp": Timestamp(unit="ms", tz="UTC"),
+                "value": Float(),
+                "name": String(),
+            },
+        )
+
+    # --- Pandas engine tests ---
+
+    def test_pandas_tz_aware_parquet_with_tz_aware_datetime(
+        self, tz_aware_parquet_cache, test_schema
+    ):
+        """Pandas: tz-aware parquet + tz-aware datetime filter should work."""
+        reader = ParquetReader(cache_dir=tz_aware_parquet_cache)
+
+        df = reader.to_dataframe(
+            engine="pandas",
+            schema=test_schema,
+            time_field="timestamp",
+            start_date=datetime(2024, 1, 15, 1, tzinfo=timezone.utc),
+            end_date=datetime(2024, 1, 15, 3, tzinfo=timezone.utc),
+        )
+
+        assert len(df) == 2  # 01:00 and 02:00
+        assert df["value"].tolist() == [2.0, 3.0]
+
+    def test_pandas_tz_aware_parquet_with_naive_datetime(
+        self, tz_aware_parquet_cache, test_schema
+    ):
+        """Pandas: tz-aware parquet + naive datetime filter should work."""
+        reader = ParquetReader(cache_dir=tz_aware_parquet_cache)
+
+        # Pass naive datetimes - should be converted to tz-aware internally
+        df = reader.to_dataframe(
+            engine="pandas",
+            schema=test_schema,
+            time_field="timestamp",
+            start_date=datetime(2024, 1, 15, 1),  # naive
+            end_date=datetime(2024, 1, 15, 3),  # naive
+        )
+
+        assert len(df) == 2  # 01:00 and 02:00
+        assert df["value"].tolist() == [2.0, 3.0]
+
+    def test_pandas_tz_naive_parquet_with_naive_datetime(
+        self, tz_naive_parquet_cache, test_schema
+    ):
+        """Pandas: tz-naive parquet + naive datetime filter should work."""
+        reader = ParquetReader(cache_dir=tz_naive_parquet_cache)
+
+        df = reader.to_dataframe(
+            engine="pandas",
+            schema=test_schema,
+            time_field="timestamp",
+            start_date=datetime(2024, 1, 15, 1),  # naive
+            end_date=datetime(2024, 1, 15, 3),  # naive
+        )
+
+        assert len(df) == 2  # 01:00 and 02:00
+        assert df["value"].tolist() == [2.0, 3.0]
+
+    def test_pandas_tz_naive_parquet_with_tz_aware_datetime(
+        self, tz_naive_parquet_cache, test_schema
+    ):
+        """Pandas: tz-naive parquet + tz-aware datetime filter should work."""
+        reader = ParquetReader(cache_dir=tz_naive_parquet_cache)
+
+        df = reader.to_dataframe(
+            engine="pandas",
+            schema=test_schema,
+            time_field="timestamp",
+            start_date=datetime(2024, 1, 15, 1, tzinfo=timezone.utc),
+            end_date=datetime(2024, 1, 15, 3, tzinfo=timezone.utc),
+        )
+
+        assert len(df) == 2  # 01:00 and 02:00
+        assert df["value"].tolist() == [2.0, 3.0]
+
+    # --- Polars engine tests ---
+
+    def test_polars_tz_aware_parquet_with_tz_aware_datetime(
+        self, tz_aware_parquet_cache, test_schema
+    ):
+        """Polars: tz-aware parquet + tz-aware datetime filter should work."""
+        pl = pytest.importorskip("polars")
+        reader = ParquetReader(cache_dir=tz_aware_parquet_cache)
+
+        df = reader.to_dataframe(
+            engine="polars",
+            schema=test_schema,
+            time_field="timestamp",
+            start_date=datetime(2024, 1, 15, 1, tzinfo=timezone.utc),
+            end_date=datetime(2024, 1, 15, 3, tzinfo=timezone.utc),
+        )
+
+        assert len(df) == 2
+        assert df["value"].to_list() == [2.0, 3.0]
+
+    def test_polars_tz_aware_parquet_with_naive_datetime(
+        self, tz_aware_parquet_cache, test_schema
+    ):
+        """Polars: tz-aware parquet + naive datetime filter should work."""
+        pl = pytest.importorskip("polars")
+        reader = ParquetReader(cache_dir=tz_aware_parquet_cache)
+
+        df = reader.to_dataframe(
+            engine="polars",
+            schema=test_schema,
+            time_field="timestamp",
+            start_date=datetime(2024, 1, 15, 1),  # naive
+            end_date=datetime(2024, 1, 15, 3),  # naive
+        )
+
+        assert len(df) == 2
+        assert df["value"].to_list() == [2.0, 3.0]
+
+    def test_polars_tz_naive_parquet_with_naive_datetime(
+        self, tz_naive_parquet_cache, test_schema
+    ):
+        """Polars: tz-naive parquet + naive datetime filter should work."""
+        pl = pytest.importorskip("polars")
+        reader = ParquetReader(cache_dir=tz_naive_parquet_cache)
+
+        df = reader.to_dataframe(
+            engine="polars",
+            schema=test_schema,
+            time_field="timestamp",
+            start_date=datetime(2024, 1, 15, 1),  # naive
+            end_date=datetime(2024, 1, 15, 3),  # naive
+        )
+
+        assert len(df) == 2
+        assert df["value"].to_list() == [2.0, 3.0]
+
+    def test_polars_tz_naive_parquet_with_tz_aware_datetime(
+        self, tz_naive_parquet_cache, test_schema
+    ):
+        """Polars: tz-naive parquet + tz-aware datetime filter should work."""
+        pl = pytest.importorskip("polars")
+        reader = ParquetReader(cache_dir=tz_naive_parquet_cache)
+
+        df = reader.to_dataframe(
+            engine="polars",
+            schema=test_schema,
+            time_field="timestamp",
+            start_date=datetime(2024, 1, 15, 1, tzinfo=timezone.utc),
+            end_date=datetime(2024, 1, 15, 3, tzinfo=timezone.utc),
+        )
+
+        assert len(df) == 2
+        assert df["value"].to_list() == [2.0, 3.0]
+
+    # --- iter_dataframe_batches tests ---
+
+    def test_iter_batches_tz_aware_parquet_with_naive_datetime(
+        self, tz_aware_parquet_cache, test_schema
+    ):
+        """iter_dataframe_batches: tz-aware parquet + naive datetime should work."""
+        reader = ParquetReader(cache_dir=tz_aware_parquet_cache)
+
+        batches = list(
+            reader.iter_dataframe_batches(
+                schema=test_schema,
+                time_field="timestamp",
+                start_date=datetime(2024, 1, 15, 1),  # naive
+                end_date=datetime(2024, 1, 15, 4),  # naive
+                batch_size=100,
+            )
+        )
+
+        assert len(batches) == 1
+        df = batches[0]
+        assert len(df) == 3  # 01:00, 02:00, 03:00
+        assert df["value"].tolist() == [2.0, 3.0, 4.0]
+
+    def test_iter_batches_tz_naive_parquet_with_tz_aware_datetime(
+        self, tz_naive_parquet_cache, test_schema
+    ):
+        """iter_dataframe_batches: tz-naive parquet + tz-aware datetime should work."""
+        reader = ParquetReader(cache_dir=tz_naive_parquet_cache)
+
+        batches = list(
+            reader.iter_dataframe_batches(
+                schema=test_schema,
+                time_field="timestamp",
+                start_date=datetime(2024, 1, 15, 1, tzinfo=timezone.utc),
+                end_date=datetime(2024, 1, 15, 4, tzinfo=timezone.utc),
+                batch_size=100,
+            )
+        )
+
+        assert len(batches) == 1
+        df = batches[0]
+        assert len(df) == 3  # 01:00, 02:00, 03:00
+        assert df["value"].tolist() == [2.0, 3.0, 4.0]
+
+    # --- Edge case tests ---
+
+    def test_start_date_only_with_naive_datetime(
+        self, tz_aware_parquet_cache, test_schema
+    ):
+        """Filtering with only start_date (naive) should work."""
+        reader = ParquetReader(cache_dir=tz_aware_parquet_cache)
+
+        df = reader.to_dataframe(
+            engine="pandas",
+            schema=test_schema,
+            time_field="timestamp",
+            start_date=datetime(2024, 1, 15, 3),  # naive, no end_date
+        )
+
+        assert len(df) == 2  # 03:00 and 04:00
+        assert df["value"].tolist() == [4.0, 5.0]
+
+    def test_end_date_only_with_naive_datetime(
+        self, tz_aware_parquet_cache, test_schema
+    ):
+        """Filtering with only end_date (naive) should work."""
+        reader = ParquetReader(cache_dir=tz_aware_parquet_cache)
+
+        df = reader.to_dataframe(
+            engine="pandas",
+            schema=test_schema,
+            time_field="timestamp",
+            end_date=datetime(2024, 1, 15, 2),  # naive, no start_date
+        )
+
+        assert len(df) == 2  # 00:00 and 01:00
+        assert df["value"].tolist() == [1.0, 2.0]
