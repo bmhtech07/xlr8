@@ -833,7 +833,7 @@ def build_brackets_for_find(
                    they can be merged into a single bracket. Only possible if
                    time ranges are contiguous with no gaps.
            Example: Branch A [Jan 1-15], Branch B [Jan 10-20]
-                   -> Merged [Jan 1-20] ✓
+                   -> Merged [Jan 1-20]
                    Branch A [Jan 1-15], Branch B [Jan 20-31]
                    -> Cannot merge (gap!) ✗
 

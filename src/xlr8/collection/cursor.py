@@ -214,6 +214,7 @@ class XLR8Cursor:
         limit: int = 0,
         sort: Optional[List[tuple]] = None,
         batch_size: int = 1000,
+        **kwargs: Any,
     ):
         """
         Initialize cursor.
@@ -226,6 +227,9 @@ class XLR8Cursor:
             limit: Maximum documents to return (0 = unlimited)
             sort: List of (field, direction) tuples
             batch_size: Batch size for iteration
+            **kwargs: Additional PyMongo cursor options (no_cursor_timeout,
+                     cursor_type, collation, hint, max_time_ms, etc.)
+                     These are passed through to PyMongo when iterating.
         """
         self._collection = collection
         self._filter = query_filter
@@ -234,6 +238,7 @@ class XLR8Cursor:
         self._limit = limit
         self._sort = sort
         self._batch_size = batch_size
+        self._cursor_kwargs = kwargs  # Store all additional PyMongo options
 
         # Iteration state
         self._started = False
@@ -272,6 +277,7 @@ class XLR8Cursor:
                 limit=self._limit,
                 sort=self._sort,
                 batch_size=self._batch_size,
+                **self._cursor_kwargs,  # Pass through all PyMongo cursor options
             )
 
     def raw_cursor(self):

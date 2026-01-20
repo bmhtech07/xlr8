@@ -1192,9 +1192,7 @@ class TestEdgeCasesDataLossPrevention:
         assert bounds is not None
         # Should take t2 as lower bound (the actual value from more restrictive $gt)
         # The lo_inclusive flag handles the exclusivity, not microsecond adjustment
-        assert (
-            bounds[0] == t2
-        ), f"Expected lower bound {t2}, got {bounds[0]}"
+        assert bounds[0] == t2, f"Expected lower bound {t2}, got {bounds[0]}"
 
     def test_multiple_upper_bound_operators(self):
         """Multiple upper bound operators ($lt + $lte) should take most restrictive."""

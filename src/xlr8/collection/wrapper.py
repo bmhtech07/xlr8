@@ -281,6 +281,7 @@ class XLR8Collection:
             limit=limit,
             sort=sort,
             batch_size=batch_size,
+            **kwargs,  # Pass through all PyMongo cursor options
         )
 
     # XLR8-specific methods

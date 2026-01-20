@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "xlr8"
-version = "0.1.7b2"
+version = "0.1.7b3"
 description = "High-performance database read acceleration layer for MongoDB. Auto-chunks and parallelizes queries across multiple-workers, streams results to parquet with intelligent caching and memory-bounded execution, option to stream data directly to any data lake. Same PyMongo API but dramatically faster results with RUST backend for CPU-heavy tasks."
 readme = "README_PYPI.md"
 requires-python = ">=3.11"
@@ -66,6 +66,7 @@ ignore = []
 "__init__.py" = ["F401"]
 "tests/**" = ["F841"]  # Allow unused variables in tests
 "src/xlr8/collection/cursor.py" = ["E402", "E501", "I001", "W291", "W293"]
+"stubs/**" = ["E501", "F811", "F821", "I001", "F403", "F405"]  # Ignore auto-generated stub file errors
 
 [tool.pyright]
 include = ["src", "tests"]

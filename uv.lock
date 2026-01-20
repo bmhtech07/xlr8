@@ -769,7 +769,7 @@ wheels = [
 
 [[package]]
 name = "xlr8"
-version = "0.1.7b2"
+version = "0.1.7b3"
 source = { editable = "." }
 dependencies = [
     { name = "duckdb" },
