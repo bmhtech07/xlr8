@@ -10,6 +10,7 @@ Uses MockDataGenerator to create random data and validates full round-trip:
 6. Verify original data matches decoded data
 """
 
+import logging
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -220,7 +221,9 @@ class TestValueEncoderRoundTrip:
             else:
                 assert decoded == original, f"Row {i}: {original} != {decoded}"
 
-        print(f"✅ Successfully round-tripped {num_docs} documents with mixed types!")
+        logging.debug(
+            f"✅ Successfully round-tripped {num_docs} documents with mixed types!"
+        )
 
     def test_type_ordering_edge_cases(self, generator):
         """Test encoding/decoding of edge cases for sorting."""

@@ -152,7 +152,7 @@ class ParquetReader:
         >>>
         >>> # Stream all documents
         >>> for doc in reader.iter_documents():
-        ...     print(doc)
+        ...     logging.debug(doc)
         >>>
         >>> # Or load to DataFrame
         >>> df = reader.to_dataframe()
@@ -946,7 +946,7 @@ class ParquetReader:
             files = ", ".join([f"'{f}'" for f in file_paths])
             query = f"SELECT * FROM read_parquet([{files}]) ORDER BY {order_by}"
 
-            print(f"[DuckDB] K-way merge (full): {len(file_paths)} files")
+            logging.debug(f"[DuckDB] K-way merge (full): {len(file_paths)} files")
 
             # Fetch entire result at once using df()
             df = conn.execute(query).df()
@@ -985,7 +985,7 @@ class ParquetReader:
             df = self._process_dataframe(df, "pandas", schema, coerce)
 
             conn.close()
-            print(f"[DuckDB] K-way merge complete: {len(df):,} rows")
+            logging.debug(f"[DuckDB] K-way merge complete: {len(df):,} rows")
             logger.debug(f"DuckDB K-way merge complete: {len(df):,} rows")
 
             return df
@@ -1255,7 +1255,7 @@ class ParquetReader:
             total_rows = 0
             column_names = [desc[0] for desc in result.description]
 
-            print(
+            logging.debug(
                 f"[DuckDB] K-way merge started: {len(file_paths)} files, "
                 f"batch_size={batch_size:,}"
             )

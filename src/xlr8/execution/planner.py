@@ -168,7 +168,7 @@ def calculate_flush_trigger(
 
     Example:
         >>> trigger, batch = calculate_flush_trigger(5000, 16, 250)
-        >>> print(f"Per-worker: {trigger}MB, batch: {batch} docs")
+        >>> logging.debug(f"Per-worker: {trigger}MB, batch: {batch} docs")
         Per-worker: 300MB, batch: 500000 docs
     """
     # Available RAM after baseline overhead

@@ -28,7 +28,7 @@ schema = Schema(
 
 # Connect to MongoDB and get collection
 client = MongoClient("mongodb://localhost:27017")
-collection = client["main"]["sensorLogs"]
+collection = client["main"]["sensorData"]
 
 # Wrap collection with schema for acceleration
 xlr8_collection = accelerate(

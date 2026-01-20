@@ -708,9 +708,9 @@ def execute_partitioned_callback(
     # Each worker gets an equal share
     worker_memory_mb = max(64, memory_limit_mb // max_workers)
 
-    print("\n[Partition] Building partition plan...")
-    print(f"  - Time bucket: {partition_time_delta}")
-    print(f"  - Partition by: {partition_by or 'None (time only)'}")
+    logging.debug("\n[Partition] Building partition plan...")
+    logging.debug(f"  - Time bucket: {partition_time_delta}")
+    logging.debug(f"  - Partition by: {partition_by or 'None (time only)'}")
 
     # Build partition plan
     work_items = _build_partition_plan(
@@ -723,7 +723,7 @@ def execute_partitioned_callback(
     )
 
     if not work_items:
-        print("[Partition] No partitions found!")
+        logging.debug("[Partition] No partitions found!")
         return {
             "total_partitions": 0,
             "total_rows": 0,
@@ -731,8 +731,8 @@ def execute_partitioned_callback(
             "duration_s": time.time() - start_time,
         }
 
-    print(f"[Partition] Found {len(work_items)} partitions")
-    print(
+    logging.debug(f"[Partition] Found {len(work_items)} partitions")
+    logging.debug(
         f"[Partition] Executing callbacks with {max_workers} workers "
         f"(memory per worker: {worker_memory_mb}MB)"
     )
@@ -778,11 +778,11 @@ def execute_partitioned_callback(
     duration = time.time() - start_time
     total_rows = sum(r.get("rows", 0) for r in results)
 
-    print("\n[Partition] Complete:")
-    print(f"  - Total partitions: {len(work_items)}")
-    print(f"  - Skipped (empty): {skipped}")
-    print(f"  - Total rows: {total_rows:,}")
-    print(f"  - Duration: {duration:.2f}s")
+    logging.debug("\n[Partition] Complete:")
+    logging.debug(f"  - Total partitions: {len(work_items)}")
+    logging.debug(f"  - Skipped (empty): {skipped}")
+    logging.debug(f"  - Total rows: {total_rows:,}")
+    logging.debug(f"  - Duration: {duration:.2f}s")
 
     return {
         "total_partitions": len(work_items),

@@ -190,13 +190,13 @@ API USAGE
     result = is_chunkable_query(query, "timestamp")
 
     if result.mode == ChunkabilityMode.PARALLEL:
-        print(f"Can parallelize from {result.bounds[0]} to {result.bounds[1]}")
+        logging.debug(f"Can parallelize from {result.bounds[0]} to {result.bounds[1]}")
         # Proceed with parallel execution
     elif result.mode == ChunkabilityMode.SINGLE:
-        print(f"Single-worker mode: {result.reason}")
+        logging.debug(f"Single-worker mode: {result.reason}")
         # Execute with one worker (still faster than PyMongo)
     else:  # REJECT
-        print(f"Cannot execute: {result.reason}")
+        logging.debug(f"Cannot execute: {result.reason}")
         # Raise error or fall back to PyMongo
 
     # Backwards-compatible boolean properties

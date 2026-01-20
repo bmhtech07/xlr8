@@ -342,27 +342,27 @@ def execute_parallel_stream_to_cache(
     # Cap worker count to actual number of chunks - no point having idle workers
     actual_worker_count = min(exec_plan.worker_count, len(chunks))
 
-    print("\n[Plan] Execution Plan:")
+    logging.debug("\n[Plan] Execution Plan:")
     if start_time is not None and end_time is not None:
-        print(f"  - Date range: {start_time.date()} to {end_time.date()}")
-        print(f"  - Total days: {(end_time - start_time).days}")
+        logging.debug(f"  - Date range: {start_time.date()} to {end_time.date()}")
+        logging.debug(f"  - Total days: {(end_time - start_time).days}")
     else:
-        print("  - Mode: Unchunked queries (no time range)")
-    print(f"  - Chunks: {len(chunks)}")
-    print(f"  - Workers: {actual_worker_count}")
+        logging.debug("  - Mode: Unchunked queries (no time range)")
+    logging.debug(f"  - Chunks: {len(chunks)}")
+    logging.debug(f"  - Workers: {actual_worker_count}")
     chunk_seconds = int(exec_plan.chunk_size.total_seconds())
     if chunk_seconds > 0:
         if chunk_seconds >= 86400:
-            print(f"  - Chunk size: {chunk_seconds // 86400} day(s)")
+            logging.debug(f"  - Chunk size: {chunk_seconds // 86400} day(s)")
         elif chunk_seconds >= 3600:
-            print(f"  - Chunk size: {chunk_seconds // 3600} hour(s)")
+            logging.debug(f"  - Chunk size: {chunk_seconds // 3600} hour(s)")
         elif chunk_seconds >= 60:
-            print(f"  - Chunk size: {chunk_seconds // 60} minute(s)")
+            logging.debug(f"  - Chunk size: {chunk_seconds // 60} minute(s)")
         else:
-            print(f"  - Chunk size: {chunk_seconds} second(s)")
-    print(f"  - Batch size: {exec_plan.batch_size_docs:,}")
-    print(f"  - Flush trigger/worker: {exec_plan.flush_trigger_mb} MB")
-    print(f"  - Max Estimated RAM Usage: {exec_plan.estimated_ram_mb:,} MB")
+            logging.debug(f"  - Chunk size: {chunk_seconds} second(s)")
+    logging.debug(f"  - Batch size: {exec_plan.batch_size_docs:,}")
+    logging.debug(f"  - Flush trigger/worker: {exec_plan.flush_trigger_mb} MB")
+    logging.debug(f"  - Max Estimated RAM Usage: {exec_plan.estimated_ram_mb:,} MB")
 
     # =========================================================================
     # RUST BACKEND EXECUTION (Phase 2 - Full GIL-free implementation)
@@ -403,7 +403,7 @@ def execute_parallel_stream_to_cache(
     # Prepare schema JSON for Rust
     schema_json = json.dumps(schema.to_spec())
 
-    print("  - Mode: RUST BACKEND (GIL-free, tokio async)")
+    logging.debug("  - Mode: RUST BACKEND (GIL-free, tokio async)")
 
     # Call Rust backend directly!
     from xlr8 import rust_backend

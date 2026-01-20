@@ -202,7 +202,7 @@ class XLR8Cursor:
         >>>
         >>> # Or use like regular PyMongo cursor:
         >>> for doc in cursor:
-        ...     print(doc)
+        ...     logging.debug(doc)
     """
 
     def __init__(
@@ -443,31 +443,31 @@ class XLR8Cursor:
 
         This is the main acceleration entry point. If the query is chunkable
         and acceleration is enabled, uses parallel execution and Parquet caching
-        for 2-5x speedup on large result sets.
+        for upto 4x speedup on large result sets.
 
-        ┌─────────────────────────────────────────────────────────────────────┐
-        │ DATA FLOW - ACCELERATION DECISION:                                  │
-        │                                                                     │
-        │ INPUT: self._filter (the MongoDB query)                             │
-        │ Example: {                                                          │
-        │     "timestamp": {"$gte": datetime(2024,1,1), "$lt": datetime(...)},│
-        │     "$or": [{"metadata.sensor_id": ObjectId("64a...")}]          │
-        │ }                                                                   │
-        │                                                                     │
-        │ DECISION STEPS:                                                     │
-        │ 1. Check if schema exists         -> No: raise error (schema required)│
-        │ 2. Check if query is chunkable    -> No: single-worker, still Parquet│
-        │    (is_chunkable_query checks for time bounds, forbidden ops)       │
-        │ 3. If chunkable: use parallel workers based on time span            │
-        │                                                                     │
-        │ OUTPUT: pandas.DataFrame with columns from schema                   │
-        │ Example columns: [timestamp, metadata.device_id, value]             │
-        │                                                                     │
-        │ PERFORMANCE:                                                        │
-        │ - Regular path: ~30s for 500K docs (sequential cursor iteration)    │
-        │ - Accelerated path: ~10s for 500K docs (parallel + caching)         │
-        │ - Cache hit: ~0.5s for 500K docs (read from Parquet)                │
-        └─────────────────────────────────────────────────────────────────────┘
+
+        DATA FLOW - ACCELERATION DECISION:
+
+        INPUT: self._filter (the MongoDB query)
+        Example: {
+            "timestamp": {"$gte": datetime(2024,1,1), "$lt": datetime(...)},
+            "$or": [{"metadata.sensor_id": ObjectId("64a...")}]
+        }
+
+        DECISION STEPS:
+        1. Check if schema exists         -> No: raise error (schema required)
+        2. Check if query is chunkable    -> No: single-worker, still Parquet
+        (is_chunkable_query checks for time bounds, forbidden ops)
+        3. If chunkable: use parallel workers based on time span
+
+        OUTPUT: pandas.DataFrame with columns from schema
+        Example columns: [timestamp, metadata.device_id, value]
+
+        PERFORMANCE ( Obviously depends on data size, schema,
+        cache state etc. but this is just for illustration ):
+        - Regular path: ~30s for 500K docs (sequential cursor iteration)
+        - Accelerated path: ~10s for 500K docs (parallel + caching)
+        - Cache hit: ~0.5s for 500K docs (read from Parquet)
 
         Args:
             accelerate: Enable acceleration if query is chunkable
@@ -698,18 +698,18 @@ class XLR8Cursor:
         result sets. Instead of loading the entire result into memory, it yields
         smaller DataFrames that can be processed incrementally.
 
-        ┌─────────────────────────────────────────────────────────────────────┐
-        │ MEMORY-EFFICIENT BATCH PROCESSING:                                  │
-        │                                                                     │
-        │ Instead of:                                                         │
-        │   df = cursor.to_dataframe()  # Loads ALL 10M rows into RAM         │
-        │                                                                     │
-        │ Use:                                                                │
-        │   for batch_df in cursor.to_dataframe_batches(batch_size=50000):    │
-        │       process(batch_df)  # Only 50K rows in RAM at a time           │
-        │                                                                     │
-        │ Memory usage: O(batch_size) instead of O(total_rows)                │
-        └─────────────────────────────────────────────────────────────────────┘
+
+        MEMORY-EFFICIENT BATCH PROCESSING:
+
+        Instead of:
+          df = cursor.to_dataframe()  # Loads ALL 10M rows into RAM
+
+        Use:
+          for batch_df in cursor.to_dataframe_batches(batch_size=50000):
+              process(batch_df)  # Only 50K rows in RAM at a time
+
+        Memory usage: O(batch_size) instead of O(total_rows)
+
 
         Args:
             batch_size: Number of rows per DataFrame batch (default: 10,000)
@@ -736,7 +736,7 @@ class XLR8Cursor:
             >>> for batch_df in cursor.to_dataframe_batches(batch_size=50000):
             ...     total += len(batch_df)
             ...     # Process batch_df...
-            >>> print(f"Processed {total} rows")
+            >>> logging.debug(f"Processed {total} rows")
             >>>
             >>> # With date filtering:
             >>> for batch_df in cursor.to_dataframe_batches(
@@ -879,7 +879,7 @@ class XLR8Cursor:
                 )
 
             # Populate cache first
-            print("[Query] Cache miss - fetching from MongoDB...")
+            logging.debug("[Query] Cache miss - fetching from MongoDB...")
 
             # Populate cache via accelerated executor
             result = execute_parallel_stream_to_cache(
@@ -897,19 +897,19 @@ class XLR8Cursor:
                 row_group_size=row_group_size,
             )
 
-            print(
+            logging.debug(
                 f"\n[Cache] Cache written: {result['total_docs']:,} docs in {result['duration_s']:.2f}s"
             )
 
         elif not cache_read and cache_write:
             # CRITICAL: cache_read=False but cache_write=True and cache exists
             # Clear old cache and re-populate to avoid duplicate data
-            print(
+            logging.debug(
                 "[Clean] Clearing existing cache (cache_read=False, starting fresh)..."
             )
             cache.clean()
 
-            print("[Query] Re-fetching from MongoDB...")
+            logging.debug("[Query] Re-fetching from MongoDB...")
 
             # Re-populate cache via accelerated executor
             result = execute_parallel_stream_to_cache(
@@ -927,17 +927,17 @@ class XLR8Cursor:
                 row_group_size=row_group_size,
             )
 
-            print(
+            logging.debug(
                 f"\n[Cache] Cache re-written: {result['total_docs']:,} docs in {result['duration_s']:.2f}s"
             )
 
         # Now yield batches from cache
-        print(f"[Cache] Streaming batches from cache: {cache.cache_dir}")
+        logging.debug(f"[Cache] Streaming batches from cache: {cache.cache_dir}")
         reader = ParquetReader(cache.cache_dir)
 
         # Use globally sorted streaming if sort is specified
         if self._sort:
-            print("[Sort] Using DuckDB K-way merge for globally sorted batches")
+            logging.debug("[Sort] Using DuckDB K-way merge for globally sorted batches")
             yield from reader.iter_globally_sorted_batches(
                 sort_spec=self._sort,  # Pass full sort spec for multi-field sorting
                 batch_size=batch_size,
@@ -1231,7 +1231,7 @@ class XLR8Cursor:
         cache_start = time.time()
 
         if cache_read and cache.exists():
-            print(f"[Cache] Using existing cache: {cache.cache_dir}")
+            logging.debug(f"[Cache] Using existing cache: {cache.cache_dir}")
         else:
             if not cache_write:
                 raise ValueError(
@@ -1240,10 +1240,10 @@ class XLR8Cursor:
                 )
 
             if cache.exists() and not cache_read:
-                print("[Clean] Clearing existing cache (cache_read=False)...")
+                logging.debug("[Clean] Clearing existing cache (cache_read=False)...")
                 cache.clean()
 
-            print("[Query] Downloading from MongoDB to cache...")
+            logging.debug("[Query] Downloading from MongoDB to cache...")
             result = execute_parallel_stream_to_cache(
                 pymongo_collection=self._collection.pymongo_collection,
                 filter_dict=self._filter,
@@ -1257,7 +1257,7 @@ class XLR8Cursor:
                 mongo_uri=self._collection.mongo_uri,
                 row_group_size=row_group_size,
             )
-            print(
+            logging.debug(
                 f"[Cache] Downloaded: {result['total_docs']:,} docs in {result['duration_s']:.2f}s"
             )
 
@@ -1460,7 +1460,7 @@ class XLR8Cursor:
 
         # Check if cache exists
         if cache_read and cache.exists():
-            print(f"[Cache] Reading from cache (polars): {cache.cache_dir}")
+            logging.debug(f"[Cache] Reading from cache (polars): {cache.cache_dir}")
             reader = ParquetReader(cache.cache_dir)
             df = cast(
                 pl.DataFrame,
@@ -1501,7 +1501,9 @@ class XLR8Cursor:
 
             if self._sort and need_duckdb_sort:
                 # Use DuckDB for Any/List type sorting (requires BSON type ordering / array sorting)
-                print("[Sort] Using DuckDB for Types.Any()/Types.List() sorting...")
+                logging.debug(
+                    "[Sort] Using DuckDB for Types.Any()/Types.List() sorting..."
+                )
 
                 warnings.warn(
                     "Sorting by Types.Any() field in to_polars returns raw struct columns "
@@ -1565,7 +1567,7 @@ class XLR8Cursor:
             if self._limit:
                 df = df.head(self._limit)
 
-            print(
+            logging.debug(
                 f"[OK] Loaded {len(df):,} documents from cache ({reader.get_statistics()['total_size_mb']:.1f} MB)"
             )
             return df
@@ -1581,7 +1583,9 @@ class XLR8Cursor:
         mode_str = (
             "parallel" if is_chunkable and chunking_granularity else "single-worker"
         )
-        print(f"[Query] Cache miss - fetching from MongoDB ({mode_str} mode)...")
+        logging.debug(
+            f"[Query] Cache miss - fetching from MongoDB ({mode_str} mode)..."
+        )
 
         result = execute_parallel_stream_to_cache(
             pymongo_collection=self._collection.pymongo_collection,
@@ -1597,12 +1601,12 @@ class XLR8Cursor:
             row_group_size=row_group_size,
         )
 
-        print(
+        logging.debug(
             f"\n[Cache] Cache written: {result['total_docs']:,} docs in {result['duration_s']:.2f}s"
         )
 
         # Read from cache as Polars
-        print("[Cache] Reading from cache to build Polars DataFrame...")
+        logging.debug("[Cache] Reading from cache to build Polars DataFrame...")
         reader = ParquetReader(cache.cache_dir)
 
         # Check if we need DuckDB sorting (Any types or List types)
@@ -1631,7 +1635,7 @@ class XLR8Cursor:
 
         if self._sort and need_duckdb_sort:
             # Use DuckDB for Any/List type sorting (requires BSON type ordering / array sorting)
-            print("[Sort] Using DuckDB for Types.Any()/Types.List() sorting...")
+            logging.debug("[Sort] Using DuckDB for Types.Any()/Types.List() sorting...")
 
             warnings.warn(
                 "Sorting by Types.Any() field in to_polars returns raw struct columns "
@@ -1843,7 +1847,7 @@ class XLR8Cursor:
         # Example: .cache/abc123def/ts_1704067200_1704070800_part_0000.parquet
         # ─────────────────────────────────────────────────────────────────────
         if cache_read and cache.exists():
-            print(f"[Cache] Reading from cache: {cache.cache_dir}")
+            logging.debug(f"[Cache] Reading from cache: {cache.cache_dir}")
             reader = ParquetReader(cache.cache_dir)
 
             # Check if we need DuckDB sorting (Any types or List types)
@@ -1872,7 +1876,9 @@ class XLR8Cursor:
 
             if self._sort and need_duckdb_sort:
                 # Use DuckDB for Any/List type sorting (requires BSON type ordering / array sorting)
-                print("[Sort] Using DuckDB for Types.Any()/Types.List() sorting...")
+                logging.debug(
+                    "[Sort] Using DuckDB for Types.Any()/Types.List() sorting..."
+                )
                 df = cast(
                     pd.DataFrame,
                     reader.get_globally_sorted_dataframe(
@@ -1933,7 +1939,7 @@ class XLR8Cursor:
             filter_info = ""
             if start_date or end_date:
                 filter_info = f" (filtered: {start_date} to {end_date})"
-            print(
+            logging.debug(
                 f"[OK] Loaded {len(df):,} documents from cache{filter_info} ({reader.get_statistics()['total_size_mb']:.1f} MB)"
             )
             return cast(pd.DataFrame, df)
@@ -1943,14 +1949,16 @@ class XLR8Cursor:
         # This is where the heavy lifting happens
         # ─────────────────────────────────────────────────────────────────────
         mode_str = "parallel" if is_chunkable else "single-worker"
-        print(f"[Query] Cache miss - fetching from MongoDB ({mode_str} mode)...")
+        logging.debug(
+            f"[Query] Cache miss - fetching from MongoDB ({mode_str} mode)..."
+        )
 
         if cache_write:
             # CRITICAL: If cache_read=False but cache_write=True and cache exists,
             # we need to clear the old cache first to avoid duplicate data
             if not cache_read and cache.exists():
-                print(
-                    "🧹 Clearing existing cache (cache_read=False, starting fresh)..."
+                logging.debug(
+                    "Clearing existing cache (cache_read=False, starting fresh)..."
                 )
                 cache.clean()
             # chunking_granularity is passed from to_dataframe()
@@ -1971,15 +1979,15 @@ class XLR8Cursor:
                 row_group_size=row_group_size,
             )
 
-            print("\n[Cache] Cache written:")
-            print(f"  - Total docs: {result['total_docs']:,}")
-            print(f"  - Total files: {result['total_files']}")
-            print(f"  - Workers: {result['workers']}")
-            print(f"  - Duration: {result['duration_s']:.2f}s")
-            print(f"  - Cache dir: {cache.cache_dir}")
+            logging.debug("\n[Cache] Cache written:")
+            logging.debug(f"  - Total docs: {result['total_docs']:,}")
+            logging.debug(f"  - Total files: {result['total_files']}")
+            logging.debug(f"  - Workers: {result['workers']}")
+            logging.debug(f"  - Duration: {result['duration_s']:.2f}s")
+            logging.debug(f"  - Cache dir: {cache.cache_dir}")
 
             # Now read from cache to build DataFrame (with optional date filter)
-            print("\n[Cache] Reading from cache to build DataFrame...")
+            logging.debug("\n[Cache] Reading from cache to build DataFrame...")
             reader = ParquetReader(cache.cache_dir)
 
             # Check if we need DuckDB sorting (Any types or List types)
@@ -2008,7 +2016,9 @@ class XLR8Cursor:
 
             if self._sort and need_duckdb_sort:
                 # Use DuckDB for Any/List type sorting (requires BSON type ordering / array sorting)
-                print("[Sort] Using DuckDB for Types.Any()/Types.List() sorting...")
+                logging.debug(
+                    "[Sort] Using DuckDB for Types.Any()/Types.List() sorting..."
+                )
                 df = cast(
                     pd.DataFrame,
                     reader.get_globally_sorted_dataframe(

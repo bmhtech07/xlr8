@@ -113,9 +113,6 @@ class XLR8Collection:
         pymongo_collection,
         schema: Optional[Schema] = None,
         mongo_uri: Union[str, Callable[[], str], None] = None,
-        cache_dir: Optional[str] = None,
-        enable_cache: bool = True,
-        metadata_cardinality: int = 1,
         approx_document_size_bytes: int = 500,
     ):
         """
@@ -128,26 +125,20 @@ class XLR8Collection:
                        Required for accelerated execution. Can be:
                        - A string: "mongodb://localhost:27017"
                        - A callable: lambda: os.environ["MONGODB_URI"]
-            cache_dir: Directory for Parquet cache (default: ./.xlr8_cache)
-            enable_cache: Enable Parquet caching
-            metadata_cardinality: Number of unique metadata combinations
-                (e.g., sensor count)
             approx_document_size_bytes: Approximate size of each document in bytes
-                (default: 500)
+                (default: 500). Used for memory budget calculations.
 
         Note:
+            Cache directory is auto-managed based on query hash.
             flush_ram_limit_mb and max_workers are parameters of to_dataframe(),
             to_polars(), etc. for per-query control.
         """
         self._pymongo_collection = pymongo_collection
         self._schema = schema
         self._mongo_uri = mongo_uri
-        self._cache_dir = cache_dir or "./.xlr8_cache"
-        self._enable_cache = enable_cache
-        self._metadata_cardinality = metadata_cardinality
         self._approx_document_size_bytes = approx_document_size_bytes
 
-    def raw_collection(self):
+    def raw_collection(self) -> PyMongoCollection:
         """
         Get direct access to underlying PyMongo collection.
 
@@ -165,7 +156,6 @@ class XLR8Collection:
         return self._pymongo_collection
 
     # PyMongo pass-through properties
-
     @property
     def name(self) -> str:
         """Collection name."""
@@ -219,7 +209,6 @@ class XLR8Collection:
         return getattr(self._pymongo_collection, name)
 
     # Read operations (can be accelerated)
-
     def find(
         self,
         filter: Optional[Dict[str, Any]] = None,
@@ -236,28 +225,27 @@ class XLR8Collection:
         Returns XLR8Cursor which is PyMongo-compatible but can accelerate
         to_dataframe() / to_polars() conversions.
 
-        ┌─────────────────────────────────────────────────────────────────────┐
-        │ DATA FLOW EXAMPLE:                                                  │
-        │                                                                     │
-        │ INPUT (filter parameter):                                           │
-        │ {                                                                   │
-        │     "$or": [                                                        │
-        │         {"metadata.sensor_id": ObjectId("64a...")},              │
-        │         {"metadata.sensor_id": ObjectId("64b...")},              │
-        │     ],                                                              │
-        │     "timestamp": {"$gte": datetime(2024,1,1), "$lt": datetime(...)} │
-        │ }                                                                   │
-        │                                                                     │
-        │ OUTPUT: XLR8Cursor object containing:                               │
-        │ - _filter: The query dict (unchanged)                               │
-        │ - _collection: Reference back to this XLR8Collection                │
-        │ - _projection, _skip, _limit, _sort: Query modifiers                │
-        │                                                                     │
-        │ NEXT STEP: User calls cursor.to_dataframe() which triggers:         │
-        │ 1. Query analysis in analysis/brackets.py                           │
-        │ 2. Execution planning in execution/planner.py                       │
-        │ 3. Parallel fetch in execution/worker.py                            │
-        └─────────────────────────────────────────────────────────────────────┘
+
+        DATA FLOW EXAMPLE:
+
+        INPUT (filter parameter):
+        {
+            "$or": [
+                {"metadata.sensor_id": ObjectId("64a...")},
+                {"metadata.sensor_id": ObjectId("64b...")},
+            ],
+            "timestamp": {"$gte": datetime(2024,1,1), "$lt": datetime(...)}
+        }
+
+        OUTPUT: XLR8Cursor object containing:
+        - _filter: The query dict (unchanged)
+        - _collection: Reference back to this XLR8Collection
+        - _projection, _skip, _limit, _sort: Query modifiers
+
+        NEXT STEP: User calls cursor.to_dataframe() which triggers:
+        1. Query analysis in analysis/brackets.py
+        2. Execution planning in execution/planner.py
+        3. Parallel fetch in execution/worker.py
 
         Args:
             filter: Query filter dict
@@ -295,238 +283,6 @@ class XLR8Collection:
             batch_size=batch_size,
         )
 
-    def find_one(
-        self,
-        filter: Optional[Dict[str, Any]] = None,
-        projection: Optional[Dict[str, Any]] = None,
-        **kwargs,
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Get single document.
-
-        Pass-through to PyMongo (no acceleration).
-
-        Args:
-            filter: Query filter
-            projection: Field projection
-            **kwargs: Additional options
-
-        Returns:
-            Document dict or None
-        """
-        return self._pymongo_collection.find_one(
-            filter=filter, projection=projection, **kwargs
-        )
-
-    def count_documents(self, filter: Dict[str, Any], **kwargs) -> int:
-        """
-        Count matching documents.
-
-        Pass-through to PyMongo (no acceleration).
-
-        Args:
-            filter: Query filter
-            **kwargs: Additional options
-
-        Returns:
-            Document count
-        """
-        return self._pymongo_collection.count_documents(filter, **kwargs)
-
-    def estimated_document_count(self, **kwargs) -> int:
-        """
-        Get estimated total document count.
-
-        Pass-through to PyMongo.
-
-        Returns:
-            Estimated count
-        """
-        return self._pymongo_collection.estimated_document_count(**kwargs)
-
-    def distinct(
-        self, key: str, filter: Optional[Dict[str, Any]] = None, **kwargs
-    ) -> List[Any]:
-        """
-        Get distinct values.
-
-        Pass-through to PyMongo (no acceleration).
-
-        Args:
-            key: Field name
-            filter: Query filter
-            **kwargs: Additional options
-
-        Returns:
-            List of distinct values
-        """
-        return self._pymongo_collection.distinct(key, filter=filter, **kwargs)
-
-    def aggregate(self, pipeline: List[Dict[str, Any]], **kwargs):
-        """
-        Run aggregation pipeline.
-
-        Pass-through to PyMongo (no acceleration for now).
-
-        TODO: Implement acceleration for time-range aggregations.
-
-        Args:
-            pipeline: Aggregation pipeline
-            **kwargs: Additional options
-
-        Returns:
-            PyMongo CommandCursor
-        """
-        return self._pymongo_collection.aggregate(pipeline, **kwargs)
-
-    # Write operations (pass-through to PyMongo)
-
-    def insert_one(self, document: Dict[str, Any], **kwargs):
-        """
-        Insert single document.
-
-        Pass-through to PyMongo.
-
-        Args:
-            document: Document to insert
-            **kwargs: Additional options
-
-        Returns:
-            InsertOneResult
-        """
-        return self._pymongo_collection.insert_one(document, **kwargs)
-
-    def insert_many(self, documents: List[Dict[str, Any]], **kwargs):
-        """
-        Insert multiple documents.
-
-        Pass-through to PyMongo.
-
-        Args:
-            documents: Documents to insert
-            **kwargs: Additional options
-
-        Returns:
-            InsertManyResult
-        """
-        return self._pymongo_collection.insert_many(documents, **kwargs)
-
-    def update_one(self, filter: Dict[str, Any], update: Dict[str, Any], **kwargs):
-        """
-        Update single document.
-
-        Pass-through to PyMongo.
-
-        Args:
-            filter: Query filter
-            update: Update operations
-            **kwargs: Additional options
-
-        Returns:
-            UpdateResult
-        """
-        return self._pymongo_collection.update_one(filter, update, **kwargs)
-
-    def update_many(self, filter: Dict[str, Any], update: Dict[str, Any], **kwargs):
-        """
-        Update multiple documents.
-
-        Pass-through to PyMongo.
-
-        Args:
-            filter: Query filter
-            update: Update operations
-            **kwargs: Additional options
-
-        Returns:
-            UpdateResult
-        """
-        return self._pymongo_collection.update_many(filter, update, **kwargs)
-
-    def replace_one(
-        self, filter: Dict[str, Any], replacement: Dict[str, Any], **kwargs
-    ):
-        """
-        Replace single document.
-
-        Pass-through to PyMongo.
-
-        Args:
-            filter: Query filter
-            replacement: Replacement document
-            **kwargs: Additional options
-
-        Returns:
-            UpdateResult
-        """
-        return self._pymongo_collection.replace_one(filter, replacement, **kwargs)
-
-    def delete_one(self, filter: Dict[str, Any], **kwargs):
-        """
-        Delete single document.
-
-        Pass-through to PyMongo.
-
-        Args:
-            filter: Query filter
-            **kwargs: Additional options
-
-        Returns:
-            DeleteResult
-        """
-        return self._pymongo_collection.delete_one(filter, **kwargs)
-
-    def delete_many(self, filter: Dict[str, Any], **kwargs):
-        """
-        Delete multiple documents.
-
-        Pass-through to PyMongo.
-
-        Args:
-            filter: Query filter
-            **kwargs: Additional options
-
-        Returns:
-            DeleteResult
-        """
-        return self._pymongo_collection.delete_many(filter, **kwargs)
-
-    # Index operations (pass-through)
-
-    def create_index(self, keys, **kwargs):
-        """Create index. Pass-through to PyMongo."""
-        return self._pymongo_collection.create_index(keys, **kwargs)
-
-    def create_indexes(self, indexes, **kwargs):
-        """Create multiple indexes. Pass-through to PyMongo."""
-        return self._pymongo_collection.create_indexes(indexes, **kwargs)
-
-    def drop_index(self, index_or_name, **kwargs):
-        """Drop index. Pass-through to PyMongo."""
-        return self._pymongo_collection.drop_index(index_or_name, **kwargs)
-
-    def drop_indexes(self, **kwargs):
-        """Drop all indexes. Pass-through to PyMongo."""
-        return self._pymongo_collection.drop_indexes(**kwargs)
-
-    def list_indexes(self, **kwargs):
-        """List indexes. Pass-through to PyMongo."""
-        return self._pymongo_collection.list_indexes(**kwargs)
-
-    def index_information(self, **kwargs):
-        """Get index information. Pass-through to PyMongo."""
-        return self._pymongo_collection.index_information(**kwargs)
-
-    # Collection operations
-
-    def drop(self, **kwargs):
-        """Drop collection. Pass-through to PyMongo."""
-        return self._pymongo_collection.drop(**kwargs)
-
-    def rename(self, new_name: str, **kwargs):
-        """Rename collection. Pass-through to PyMongo."""
-        return self._pymongo_collection.rename(new_name, **kwargs)
-
     # XLR8-specific methods
 
     def set_schema(self, schema: Schema) -> None:
@@ -547,54 +303,42 @@ class XLR8Collection:
         """
         return self._schema
 
-    def clear_cache(self) -> None:
-        """
-        Clear Parquet cache for this collection.
-
-        TODO: Implement in storage layer.
-        """
-        # Will be implemented in storage milestone
-        pass
-
 
 def accelerate(
     pymongo_collection: PyMongoCollection,
     schema: Schema,
     mongo_uri: Union[str, Callable[[], str]],
-    cache_dir: Optional[str] = None,
-    enable_cache: bool = True,
-    metadata_cardinality: int = 1,
     approx_document_size_bytes: int = 500,
 ) -> XLR8Collection:
     """
     Convenience function to wrap a PyMongo collection with acceleration.
 
-    ┌─────────────────────────────────────────────────────────────────────────┐
-    │ DATA FLOW EXAMPLE - MAIN ENTRY POINT:                                   │
-    │                                                                         │
-    │ INPUT:                                                                  │
-    │ - pymongo_collection: client["main"]["sensorLogs"]                      │
-    │ - schema: Schema(time_field="timestamp", fields={...})                  │
-    │ - mongo_uri: Connection string used by accelerated workers              │
-    │                                                                         │
-    │ Example:                                                                │
-    │ accelerate(                                                             │
-    │     collection,                                                         │
-    │     schema,                                                             │
-    │     mongo_uri="mongodb://localhost:27017",  # Or callable               │
-    │ )                                                                       │
-    │                                                                         │
-    │ OUTPUT: XLR8Collection wrapper that:                                    │
-    │ - Wraps pymongo collection for transparent pass-through                 │
-    │ - Stores schema for type-aware Parquet encoding                         │
-    │ - Stores mongo_uri for workers to create their own connections          │
-    │                                                                         │
-    │ WHAT HAPPENS NEXT:                                                      │
-    │ 1. User calls: xlr8_col.find({...})                                     │
-    │ 2. Returns XLR8Cursor (wraps query params)                              │
-    │ 3. User calls: cursor.to_dataframe()                                    │
-    │ 4. Workers use mongo_uri to create their own connections                │
-    └─────────────────────────────────────────────────────────────────────────┘
+
+    DATA FLOW EXAMPLE - MAIN ENTRY POINT:
+
+    INPUT:
+    - pymongo_collection: client["main"]["sensorData"]
+    - schema: Schema(time_field="timestamp", fields={...})
+    - mongo_uri: Connection string used by accelerated workers
+
+    Example:
+    accelerate(
+        collection,
+        schema,
+        mongo_uri="mongodb://localhost:27017",  # Or callable
+    )
+
+    OUTPUT: XLR8Collection wrapper that:
+    - Wraps pymongo collection for transparent pass-through
+    - Stores schema for type-aware Parquet encoding
+    - Stores mongo_uri for workers to create their own connections
+
+    WHAT HAPPENS NEXT:
+    1. User calls: xlr8_col.find({...})
+    2. Returns XLR8Cursor (wraps query params)
+    3. User calls: cursor.to_dataframe()
+    4. Workers use mongo_uri to create their own connections
+
 
     Args:
         pymongo_collection: PyMongo Collection instance
@@ -603,17 +347,14 @@ def accelerate(
                    Required for accelerated execution. Can be:
                    - A string: "mongodb://localhost:27017"
                    - A callable: lambda: os.environ["MONGODB_URI"]
-        cache_dir: Cache directory (default: .xlr8_cache)
-        enable_cache: Enable caching
-        metadata_cardinality: Number of unique metadata combinations
-            (e.g., number of sensors)
         approx_document_size_bytes: Approximate size of each document in bytes
-            (default: 500)
+            (default: 500). Used for memory budget calculations.
 
     Returns:
         XLR8Collection wrapper
 
     Note:
+        Cache directory is auto-managed based on query hash.
         flush_ram_limit_mb and max_workers are parameters of to_dataframe(),
         to_polars(), etc. for per-query control.
 
@@ -654,8 +395,5 @@ def accelerate(
         pymongo_collection=pymongo_collection,
         schema=schema,
         mongo_uri=mongo_uri,
-        cache_dir=cache_dir,
-        enable_cache=enable_cache,
-        metadata_cardinality=metadata_cardinality,
         approx_document_size_bytes=approx_document_size_bytes,
     )
