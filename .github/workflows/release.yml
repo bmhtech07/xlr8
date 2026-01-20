@@ -106,6 +106,8 @@ jobs:
           command: build
           args: --release --out dist
           manylinux: auto
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload rust wheels
         uses: actions/upload-artifact@v4
@@ -131,9 +133,17 @@ jobs:
 
       - name: Gather dists
         run: |
-          mkdir -p dist
-          find dist_all -type f \( -name "*.whl" -o -name "*.tar.gz" \) -exec cp -v {} dist/ \;
-          ls -la dist
+          mkdir -p dist dist-rust dist-python
+          # Separate xlr8-rust wheels from xlr8 package
+          find dist_all -type f -name "xlr8_rust*.whl" -exec cp -v {} dist-rust/ \;
+          find dist_all -type f -name "xlr8-*.whl" -exec cp -v {} dist-python/ \;
+          find dist_all -type f -name "xlr8-*.tar.gz" -exec cp -v {} dist-python/ \;
+          # Combined dist for GitHub Release
+          cp dist-rust/* dist/ 2>/dev/null || true
+          cp dist-python/* dist/ 2>/dev/null || true
+          echo "=== dist-rust ===" && ls -la dist-rust/
+          echo "=== dist-python ===" && ls -la dist-python/
+          echo "=== dist (combined) ===" && ls -la dist/
 
       - name: Create and push tag
         run: |
@@ -153,3 +163,17 @@ jobs:
             dist/*.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish xlr8-rust to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.XLR8_PYPI_TOKEN }}
+          packages-dir: dist-rust/
+          skip-existing: true
+
+      - name: Publish xlr8 to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.XLR8_PYPI_TOKEN }}
+          packages-dir: dist-python/
+          skip-existing: true

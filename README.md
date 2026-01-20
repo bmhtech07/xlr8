@@ -1,5 +1,5 @@
 <p align="center">
-    <img src=".github/XLR8_logo.png" alt="XLR8 Logo" width="360"/>
+    <img src="https://raw.githubusercontent.com/XLR8-DB/xlr8/main/.github/XLR8_logo.png" alt="XLR8 Logo" width="360"/>
 </p>
 
 <p align="center">
