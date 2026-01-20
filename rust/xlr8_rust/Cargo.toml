@@ -1,6 +1,6 @@
 [package]
 name = "xlr8_rust"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 autobenches = false
 autotests = false  # Disable auto-detection of test files (we define them as [[bin]] targets)
