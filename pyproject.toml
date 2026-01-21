@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "xlr8"
-version = "0.1.7b3"
+version = "0.1.7"
 description = "High-performance database read acceleration layer for MongoDB. Auto-chunks and parallelizes queries across multiple-workers, streams results to parquet with intelligent caching and memory-bounded execution, option to stream data directly to any data lake. Same PyMongo API but dramatically faster results with RUST backend for CPU-heavy tasks."
 readme = "README_PYPI.md"
 requires-python = ">=3.11"
@@ -25,14 +25,14 @@ classifiers = [
     "Topic :: Database",
 ]
 dependencies = [
-    "pyarrow>14.0.1",
-    "pymongo[srv]>3.12.0",
-    "pandas>1.5.0",
-    "polars>0.15.1",
-    "duckdb>0.6.0",
-    "orjson>3.8.1",
-    "psutil",
-    "python-dotenv",
+    "pyarrow>=14.0.1,<=23.0",
+    "pymongo>=4.0.0,<=4.16.0",
+    "pandas>=2.0.0,<3.0",
+    "polars>=1.0.0,<2.0",
+    "duckdb>=1.0.0,<2.0",
+    "orjson>=3.8.1,<4.0",
+    "psutil>=5.9.0,<=7.2.1",
+    "python-dotenv>=1.0.0,<2.0",
 ]
 
 [tool.maturin]
